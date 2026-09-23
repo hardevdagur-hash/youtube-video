@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { Download, FileText, MessageSquareText, Sparkles, ShieldCheck, Zap, Database } from 'lucide-react';
+import { Download, MessageSquareText, Sparkles, ShieldCheck, Zap, Database } from 'lucide-react';
 import WorkflowCard from '../components/home/WorkflowCard';
 
 const workflows = [
@@ -35,29 +35,13 @@ const workflows = [
     to: '/transcript',
     accentColor: 'teal' as const,
   },
-  {
-    icon: FileText,
-    badge: 'AI Blog Engine',
-    title: 'URL → AI Blog',
-    description:
-      'Convert YouTube videos into publication-ready, SEO-optimized articles with knowledge graph analysis and rich editing.',
-    features: [
-      'Automated transcript analysis',
-      'Entity extraction & SEO keywords',
-      'Interactive rich markdown editor',
-      'Markdown, HTML & PDF export',
-    ],
-    cta: 'Generate AI Blog',
-    to: '/blog',
-    accentColor: 'violet' as const,
-  },
 ];
 
 const highlights = [
   { icon: Zap, label: 'Fast Async Processing' },
   { icon: ShieldCheck, label: 'Enterprise Reliability' },
   { icon: Database, label: 'YouTube Data API v3' },
-  { icon: Sparkles, label: 'Multi-LLM AI Engine' },
+  { icon: Sparkles, label: 'Whisper AI Speech-to-Text' },
 ];
 
 export default function Home() {
@@ -87,12 +71,12 @@ export default function Home() {
 
             {/* Headline */}
             <h1 className="text-3xl sm:text-5xl lg:text-6xl font-extrabold leading-[1.12] tracking-tight text-white mb-5">
-              Export YouTube Data or Generate AI Blogs
+              Export YouTube Data & Transcribe Audio
             </h1>
 
             {/* Supporting Text */}
             <p className="text-base sm:text-lg leading-relaxed text-emerald-100/90 dark:text-gray-300 max-w-2xl mx-auto mb-8">
-              Choose your workflow to get started. Extract complete channel catalogs, transcribe audio with Whisper AI, or publish SEO-optimized articles in minutes.
+              Choose your workflow to get started. Extract complete channel catalogs to formatted CSV or transcribe video audio with official captions and Whisper AI speech-to-text fallback.
             </p>
 
             {/* Trust / Capability Badges */}
@@ -111,10 +95,10 @@ export default function Home() {
         </div>
       </section>
 
-      {/* Feature Cards Section — SINGLE HORIZONTAL ROW ON DESKTOP */}
+      {/* Feature Cards Section — BALANCED 2-COLUMN ROW ON DESKTOP */}
       <section className="relative z-10 -mt-8 pb-20 sm:pb-24">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 lg:gap-8 items-stretch">
+          <div className="grid grid-cols-1 md:grid-cols-2 max-w-4xl mx-auto gap-6 lg:gap-8 items-stretch">
             {workflows.map((wf, i) => (
               <motion.div
                 key={wf.title}

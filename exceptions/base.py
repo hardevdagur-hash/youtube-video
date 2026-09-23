@@ -159,31 +159,6 @@ class TimeoutException(ApplicationException):
     status_code: int = 504
 
 
-class LLMProviderException(ExternalServiceException):
-    error_code: str = "LLM_PROVIDER_ERROR"
-    message: str = "LLM provider failed"
-
-
-class LLMAuthenticationException(AuthenticationException):
-    error_code: str = "LLM_AUTH_ERROR"
-    message: str = "LLM API key is invalid"
-
-
-class LLMRateLimitException(RateLimitException):
-    error_code: str = "LLM_RATE_LIMIT"
-    message: str = "LLM rate limit exceeded"
-
-
-class LLMContextLengthException(ValidationException):
-    error_code: str = "LLM_CONTEXT_LENGTH"
-    message: str = "Input exceeds model context window"
-
-
-class LLMTimeoutException(TimeoutException):
-    error_code: str = "LLM_TIMEOUT"
-    message: str = "LLM request timed out"
-
-
 class YouTubeAPIException(ExternalServiceException):
     error_code: str = "YOUTUBE_API_ERROR"
     message: str = "YouTube API request failed"

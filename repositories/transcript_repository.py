@@ -115,7 +115,7 @@ class TranscriptRepository:
 
         Args:
             video_id: 11-character YouTube video ID.
-            language: Target language code (e.g. 'en', 'hi').
+            language: Target language code (e.g. 'en', 'hi', 'en:simple').
 
         Returns:
             ``TranscriptResult`` if found, else None.
@@ -129,6 +129,20 @@ class TranscriptRepository:
             except Exception:
                 logger.exception("Failed to deserialize cached translation for %s/%s", video_id, language)
                 self._cache.delete(cache_key)
+
+        # Check disk persistence
+        if self._persist_dir:
+            safe_lang = language.replace(":", "_")
+            file_path = self._persist_dir / f"{video_id}_{safe_lang}.json"
+            if file_path.exists():
+                try:
+                    data = json.loads(file_path.read_text(encoding="utf-8"))
+                    self._cache.set(cache_key, data)
+                    logger.debug("Translation disk cache HIT for %s/%s", video_id, language)
+                    return TranscriptResult(**data)
+                except Exception as exc:
+                    logger.exception("Failed to read persisted translation for %s/%s: %s", video_id, language, exc)
+
         logger.debug("Translation cache MISS for %s/%s", video_id, language)
         return None
 
@@ -144,7 +158,8 @@ class TranscriptRepository:
         self._cache.set(cache_key, data)
 
         if self._persist_dir:
-            file_path = self._persist_dir / f"{transcript.video_id}_{language}.json"
+            safe_lang = language.replace(":", "_")
+            file_path = self._persist_dir / f"{transcript.video_id}_{safe_lang}.json"
             try:
                 file_path.write_text(
                     json.dumps(data, indent=2, ensure_ascii=False),

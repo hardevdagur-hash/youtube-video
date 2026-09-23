@@ -4,7 +4,7 @@ Tracks:
 - Daily/Monthly Active Users (DAU/MAU)
 - Login and signup rates
 - Session duration
-- Feature usage (projects created, blogs generated, exports, publishing)
+- Feature usage (projects created, exports, publishing)
 - Per-project activity
 - User growth rate
 """
@@ -31,7 +31,6 @@ user_signups = Counter(f"{PREFIX}_signups_total", "User signups", ["source"])
 user_logouts = Counter(f"{PREFIX}_logouts_total", "User logouts")
 
 projects_created = Counter(f"{PREFIX}_projects_created_total", "Projects created", ["user_id"])
-blogs_generated = Counter(f"{PREFIX}_blogs_generated_total", "Blogs generated", ["user_id"])
 exports_performed = Counter(f"{PREFIX}_exports_performed_total", "Exports performed", ["user_id", "format"])
 publishing_actions = Counter(f"{PREFIX}_publishing_actions_total", "Publishing actions", ["user_id", "target"])
 
@@ -56,7 +55,6 @@ class UserAnalyticsSnapshot:
     new_users_today: int = 0
     total_logins: int = 0
     total_projects: int = 0
-    total_blogs: int = 0
     total_exports: int = 0
     dau_mau_ratio: float = 0.0
     timestamp: str = ""
@@ -89,9 +87,6 @@ class UserAnalyticsCollector:
         projects_created.labels(user_id=user_id or "unknown").inc()
         self._record_feature("projects_created")
 
-    def record_blog_generated(self, user_id: str = "") -> None:
-        blogs_generated.labels(user_id=user_id or "unknown").inc()
-        self._record_feature("blogs_generated")
 
     def record_export(self, user_id: str = "", export_format: str = "") -> None:
         exports_performed.labels(user_id=user_id or "unknown", format=export_format or "unknown").inc()

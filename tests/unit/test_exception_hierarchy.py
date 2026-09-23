@@ -12,11 +12,6 @@ from exceptions import (
     DatabaseException,
     ExportException,
     ExternalServiceException,
-    LLMAuthenticationException,
-    LLMContextLengthException,
-    LLMProviderException,
-    LLMRateLimitException,
-    LLMTimeoutException,
     LogLevel,
     NotFoundException,
     PipelineException,
@@ -141,33 +136,6 @@ class TestConcreteExceptions:
         exc = TimeoutException("Timed out")
         assert exc.error_code == "TIMEOUT"
         assert exc.recoverable is True
-
-    def test_llm_provider_exception(self):
-        exc = LLMProviderException("LLM failed")
-        assert exc.error_code == "LLM_PROVIDER_ERROR"
-        assert exc.status_code == 502
-        assert exc.recoverable is True
-
-    def test_llm_auth_exception(self):
-        exc = LLMAuthenticationException("Bad key")
-        assert exc.error_code == "LLM_AUTH_ERROR"
-        assert exc.status_code == 401
-
-    def test_llm_rate_limit_exception(self):
-        exc = LLMRateLimitException("Rate limit")
-        assert exc.error_code == "LLM_RATE_LIMIT"
-        assert exc.status_code == 429
-        assert exc.recoverable is True
-
-    def test_llm_context_length_exception(self):
-        exc = LLMContextLengthException("Context too long")
-        assert exc.error_code == "LLM_CONTEXT_LENGTH"
-        assert exc.status_code == 400
-
-    def test_llm_timeout_exception(self):
-        exc = LLMTimeoutException("Timed out")
-        assert exc.error_code == "LLM_TIMEOUT"
-        assert exc.status_code == 504
 
     def test_youtube_api_exception(self):
         exc = YouTubeAPIException("API error")

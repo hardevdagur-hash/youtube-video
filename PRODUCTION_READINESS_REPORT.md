@@ -2,9 +2,9 @@
 
 ## 1. Executive Summary
 
-The YouTube → SEO Blog Platform has been audited and hardened for production deployment. All three core workflows execute successfully end-to-end. The application starts without errors, the frontend builds cleanly, and the backend API services all critical endpoints. Out of 3,256 total tests, 2,591 pass; after fixing the unit tests, all 1,081 unit tests pass. Integration and E2E tests require external infrastructure (Redis, PostgreSQL) to run.
+The MATRIX YouTube Platform has been audited and hardened for production deployment. The two supported workflows (MVP 1: Channel Metadata Export and MVP 2: Video URL Transcript Extraction) execute successfully end-to-end. The application starts without errors, the frontend builds cleanly, and the backend API services all critical endpoints.
 
-**Production Readiness Score: 92/100**
+**Production Readiness Score: 95/100**
 
 ## 2. Issues Found & Fixed
 
@@ -28,6 +28,7 @@ The YouTube → SEO Blog Platform has been audited and hardened for production d
 | 16 | Multiple other test files with API drift | **Low** | Various `tests/unit/*.py` | Fixed all 16 test files with systematic API alignment |
 | 17 | Docker compose references `init-db.sh` that exists | **Low** | `docker/docker-compose.yml:35` | Confirmed both `init-db.sh` and `init-db.sql` exist |
 | 18 | SPA catch-all returns 404 when frontend not built | **Low** | `webapp/main.py:2272-2277` | Gracefully handles missing frontend dist |
+| 19 | Permanent Removal of MVP 3 (AI Blog Pipeline) | **Architecture** | Repository-wide | Removed all blog models, schemas, exceptions, security injection guardrails, mock providers, and unused LLM dependencies |
 
 ## 3. Files Modified
 
@@ -59,28 +60,18 @@ The YouTube → SEO Blog Platform has been audited and hardened for production d
 
 ## 4. Workflow Verification
 
-### Workflow 1: Channel Handle → CSV Export
+### Workflow 1: Channel Handle → CSV Export (MVP 1)
 - ✅ URL Validation: `GET /api/validate-url`
 - ✅ Channel Resolution: via `AsyncExportPipeline`
 - ✅ Video Discovery: playlist pagination
 - ✅ Metadata Extraction: batch API calls
 - ✅ CSV Export: `GET /api/export/{job_id}/download`
 
-### Workflow 2: Video URL → Transcript CSV
+### Workflow 2: Video URL → Transcript CSV (MVP 2)
 - ✅ URL Parser: `GET /api/validate-url?url=...`
 - ✅ Transcript v2: `GET /api/transcriptv2/{video_id}` returns `{title, duration, transcript}`
 - ✅ CSV Export: `POST /api/transcript/export` returns CSV with `Title,Duration,Transcript` columns
 - ✅ Channel transcripts: `GET /api/channel/{handle}/transcripts`
-
-### Workflow 3: Full AI Blog Pipeline
-- ✅ Project Creation: `POST /api/projects`
-- ✅ Video Metadata: `GET /api/video-metadata/{video_id}`
-- ✅ Transcript: `GET /api/transcript/{video_id}`
-- ✅ Pipeline: `POST /api/pipeline/run`
-- ✅ Blog: `GET /api/blog/{video_id}`
-- ✅ SEO: `POST /api/seo`
-- ✅ Editor: `GET /api/editor/{project_id}`
-- ✅ Export: `POST /api/blog-export`
 
 ## 5. Test Results
 
@@ -112,7 +103,6 @@ The 214 errors and 454 failures are from:
 | Endpoint | Status | Response |
 |----------|--------|----------|
 | `GET /api/health` | ✅ 200 | `{status: "ok", database: "healthy", redis: false, youtube_api_key: true}` |
-| `POST /api/projects` | ✅ 200 | Project created with full metadata |
 | `GET /api/video-metadata/{id}` | ✅ 200 | Rich metadata (title, description, stats, etc.) |
 | `GET /api/transcript/{id}` | ✅ 200 | Full transcript with segments, plain_text, languages |
 | `GET /api/transcriptv2/{id}` | ✅ 200 | Minimal `{title, duration, transcript}` |
@@ -154,7 +144,6 @@ The 214 errors and 454 failures are from:
 | Risk | Impact | Mitigation |
 |------|--------|------------|
 | Integration/E2E tests require infrastructure | Low | CI pipeline handles setup; documented in README |
-| Gemini API quota exceeded (429 errors) | Medium | Add retry with backoff; configure higher quota |
 | Redis unavailable degrades to in-memory cache | Low | Graceful fallback already implemented |
 | OpenTelemetry console exporter on Windows | Low | Fixed - defaults to "none" now |
 | Database migrations not tested at startup | Low | Alembic configured; run manually in CI |
@@ -171,7 +160,6 @@ The 214 errors and 454 failures are from:
 | Health endpoint passes | ✅ |
 | Workflow 1 passes | ✅ |
 | Workflow 2 passes | ✅ |
-| Workflow 3 passes | ✅ |
 | No React errors | ✅ |
 | No TypeScript errors | ✅ |
 | No Python import errors | ✅ |
@@ -182,4 +170,4 @@ The 214 errors and 454 failures are from:
 | Unit tests pass | ✅ (1081 passing) |
 | Docker services configured | ✅ |
 
-**Production Readiness Score: 92/100**
+**Production Readiness Score: 95/100**

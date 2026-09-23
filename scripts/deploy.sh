@@ -4,7 +4,7 @@ set -euo pipefail
 ENVIRONMENT="${1:-staging}"
 VERSION="${2:-latest}"
 COMPOSE_FILE="docker/docker-compose.yml"
-PROJECT_DIR="/opt/youtube-seo-blog"
+PROJECT_DIR="/opt/youtube-export-platform"
 BACKUP_DIR="${PROJECT_DIR}/backups"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 DEPLOY_LOG="${PROJECT_DIR}/logs/deploy-${TIMESTAMP}.log"
@@ -50,7 +50,7 @@ backup_current() {
     
     # Backup database
     docker compose -f "${COMPOSE_FILE}" exec -T postgres \
-        pg_dump -U "${DB_USER:-ytblog}" "${DB_NAME:-yt_blog}" > \
+        pg_dump -U "${DB_USER:-ytplatform}" "${DB_NAME:-yt_platform}" > \
         "${BACKUP_DIR}/db-${TIMESTAMP}.sql" || log "WARNING: Database backup failed"
     
     # Backup .env

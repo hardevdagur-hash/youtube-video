@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-    Starts the YouTube SEO Blog Platform (backend + frontend) locally.
+    Starts the MATRIX YouTube Platform (backend + frontend) locally.
 .DESCRIPTION
     Launches the FastAPI backend and Vite dev server in separate terminal windows.
     Press Ctrl+C in either window to stop.
@@ -11,7 +11,7 @@ $ErrorActionPreference = "Stop"
 $rootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  YouTube SEO Blog Platform" -ForegroundColor Cyan
+Write-Host "  MATRIX YouTube Platform" -ForegroundColor Cyan
 Write-Host "  Starting backend + frontend..." -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""

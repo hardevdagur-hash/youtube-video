@@ -46,11 +46,7 @@ class CacheConfig:
 
 @dataclass
 class AIConfig:
-    gemini_api_key: str = ""
     openai_api_key: str = ""
-    anthropic_api_key: str = ""
-    default_provider: str = "gemini"
-    default_model: str = "gemini-2.5-pro"
     max_retries: int = 3
     timeout: int = 120
 
@@ -78,7 +74,7 @@ class ExportConfig:
     output_dir: str = "./exports"
     max_file_size: int = 50 * 1024 * 1024
     allowed_formats: list[str] = field(
-        default_factory=lambda: ["markdown", "html", "docx", "pdf"]
+        default_factory=lambda: ["csv", "json"]
     )
 
 
@@ -109,7 +105,7 @@ class FeatureFlagConfig:
 @dataclass
 class AppConfig:
     environment: Environment = Environment.LOCAL
-    app_name: str = "youtube-seo-blog"
+    app_name: str = "youtube-export-platform"
     version: str = "3.0.0"
     debug: bool = False
     secret_key: str = ""
@@ -147,7 +143,7 @@ class ConfigProvider:
 
         return AppConfig(
             environment=environment,
-            app_name=os.environ.get("APP_NAME", "youtube-seo-blog"),
+            app_name=os.environ.get("APP_NAME", "youtube-export-platform"),
             version=os.environ.get("APP_VERSION", "3.0.0"),
             debug=os.environ.get("DEBUG", "0").lower() in ("1", "true"),
             secret_key=os.environ.get("SECRET_KEY", ""),
@@ -168,11 +164,7 @@ class ConfigProvider:
                 enabled=os.environ.get("CACHE_ENABLED", "1").lower() in ("1", "true"),
             ),
             ai=AIConfig(
-                gemini_api_key=os.environ.get("GEMINI_API_KEY", ""),
                 openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
-                anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
-                default_provider=os.environ.get("AI_PROVIDER", "gemini"),
-                default_model=os.environ.get("AI_MODEL", "gemini-2.5-pro"),
                 max_retries=int(os.environ.get("AI_MAX_RETRIES", "3")),
                 timeout=int(os.environ.get("AI_TIMEOUT", "120")),
             ),

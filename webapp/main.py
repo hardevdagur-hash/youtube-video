@@ -29,7 +29,7 @@ GET    /api/quota                           YouTube API quota status
 GET    /api/validate-url                    Validate YouTube URL
 GET    /api/video-metadata/{video_id}       Get single video metadata
 GET    /api/transcript/{video_id}           Get transcript
-(plus all existing transcript, analysis, blog, SEO, export endpoints)
+(plus all existing transcript and metadata export endpoints)
 """
 
 from __future__ import annotations
@@ -503,6 +503,286 @@ def _get_video_service():
 
 
 # --- Transcript endpoints ---
+
+class UnifiedTranscriptRequest(BaseModel):
+    video_url: str
+    output_language: str = "original"  # "original" | "en" | "hi"
+
+
+_shared_transcript_repo = None
+_shared_transcript_service = None
+_shared_translation_service = None
+
+
+def _get_unified_services():
+    global _shared_transcript_repo, _shared_transcript_service, _shared_translation_service
+    if _shared_transcript_repo is None:
+        from repositories.transcript_repository import TranscriptRepository
+        from services.transcription.service import TranscriptService
+        from services.translation.service import TranslationService
+        _shared_transcript_repo = TranscriptRepository(persist_dir="data/transcripts")
+        _shared_transcript_service = TranscriptService(repository=_shared_transcript_repo)
+        _shared_translation_service = TranslationService(repository=_shared_transcript_repo)
+    return _shared_transcript_service, _shared_translation_service
+
+
+@app.post("/api/transcript")
+async def api_transcript_unified(request: UnifiedTranscriptRequest):
+    """Unified transcript acquisition and translation endpoint.
+
+    Pipeline:
+      1. Validates YouTube URL / Video ID
+      2. Checks canonical transcript cache (Redis/disk)
+      3. Fetches YouTube captions (zero cost)
+      4. Falls back to yt-dlp audio extraction + Groq Whisper Large V3 if captions unavailable
+      5. Cleans and normalizes transcript
+      6. Validates transcript quality and checks for hallucination loops
+      7. Caches canonical transcript
+      8. If output_language is 'en' or 'hi', derives on-demand translation with caching
+    """
+    from exceptions import YouTubeURLError
+    from observability.transcript_metrics import transcript_metrics
+    from services.transcription.groq import (
+        GroqAuthError,
+        GroqRateLimitError,
+        GroqTimeoutError,
+        GroqTranscriptionError,
+    )
+    from services.transcription.service import TranscriptService
+    from services.transcription.validator import (
+        TranscriptEmptyError,
+        TranscriptValidationError,
+    )
+    from services.translation.service import TranslationError, TranslationService
+    from services.youtube.audio import AudioExtractionError
+    from services.youtube.captions import CaptionsUnavailableError
+
+    rid = uuid.uuid4().hex[:8]
+    transcript_metrics.record_request_start()
+    out_lang = (request.output_language or "original").lower().strip()
+    if out_lang not in ("original", "en", "hi"):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "error_code": "INVALID_REQUEST",
+                "message": f"Unsupported output_language '{request.output_language}'. Must be 'original', 'en', or 'hi'.",
+                "retryable": False,
+                "trace_id": rid,
+            },
+        )
+
+    logger.info("[%s] Unified transcript request: url=%s, out_lang=%s", rid, request.video_url, out_lang)
+
+    try:
+        ts_service, trans_service = _get_unified_services()
+        # Fetch or generate canonical transcript in worker thread
+        canonical = await _to_thread(ts_service.get_canonical_transcript, request.video_url)
+
+        video_id = canonical["video_id"]
+        source_lang = canonical["source_language"]
+        canonical_text = canonical["transcript"]
+        segments = canonical["segments"]
+        provider = canonical["provider"]
+        duration_seconds = canonical.get("duration_seconds")
+        confidence = canonical.get("confidence", 1.0)
+        from_cache = canonical.get("from_cache", False)
+
+        # Record metrics based on source
+        if not from_cache:
+            if provider == "youtube_captions":
+                transcript_metrics.record_caption_result(success=True)
+            elif provider == "groq_whisper_large_v3":
+                transcript_metrics.record_caption_result(success=False)
+                transcript_metrics.record_groq_fallback(
+                    success=True,
+                    duration_sec=canonical.get("processing_time_seconds", 0.0),
+                    video_dur_sec=duration_seconds or 0.0,
+                    words=canonical.get("word_count", 0),
+                )
+
+        # Handle on-demand translation if requested
+        final_text = canonical_text
+        final_segments = segments
+        final_provider = provider
+        final_from_cache = from_cache
+
+        if out_lang in ("en", "hi"):
+            trans_result = await _to_thread(
+                trans_service.translate,
+                video_id=video_id,
+                original_text=canonical_text,
+                target_language=out_lang,
+                source_language=source_lang,
+                original_segments=segments,
+            )
+            final_text = trans_result["transcript"]
+            final_segments = trans_result.get("segments", [])
+            final_provider = trans_result.get("provider", f"groq_translation_{out_lang}")
+            final_from_cache = trans_result.get("from_cache", False)
+            transcript_metrics.record_translation(lang=out_lang, cache_hit=final_from_cache)
+
+        # Try to retrieve video title if available
+        title = None
+        try:
+            video_svc = _get_video_service()
+            items = await _to_thread(video_svc.get_videos_batch, [video_id])
+            if items:
+                title = items[0].get("snippet", {}).get("title")
+        except Exception:
+            pass
+
+        transcript_metrics.record_final_result(success=True)
+
+        return {
+            "success": True,
+            "video_id": video_id,
+            "title": title,
+            "source_language": source_lang,
+            "output_language": out_lang,
+            "provider": final_provider,
+            "transcript": final_text,
+            "segments": final_segments,
+            "word_count": len(final_text.split()),
+            "duration_seconds": duration_seconds,
+            "confidence": confidence,
+            "from_cache": final_from_cache,
+            "trace_id": rid,
+        }
+
+    except YouTubeURLError as exc:
+        logger.warning("[%s] Invalid YouTube URL: %s", rid, exc)
+        transcript_metrics.record_final_result(success=False)
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "error_code": "INVALID_YOUTUBE_URL",
+                "message": str(exc),
+                "retryable": False,
+                "trace_id": rid,
+            },
+        )
+    except CaptionsUnavailableError as exc:
+        logger.warning("[%s] Captions unavailable: %s", rid, exc)
+        transcript_metrics.record_final_result(success=False)
+        return JSONResponse(
+            status_code=404,
+            content={
+                "success": False,
+                "error_code": exc.error_code,
+                "message": exc.message,
+                "retryable": False,
+                "trace_id": rid,
+            },
+        )
+    except AudioExtractionError as exc:
+        logger.error("[%s] Audio extraction failed: %s", rid, exc)
+        transcript_metrics.record_groq_fallback(success=False)
+        transcript_metrics.record_final_result(success=False)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error_code": exc.error_code,
+                "message": "Audio could not be extracted from this YouTube video for speech-to-text.",
+                "retryable": True,
+                "trace_id": rid,
+            },
+        )
+    except GroqAuthError as exc:
+        logger.error("[%s] Groq authentication failed: %s", rid, exc)
+        transcript_metrics.record_groq_fallback(success=False)
+        transcript_metrics.record_final_result(success=False)
+        return JSONResponse(
+            status_code=401,
+            content={
+                "success": False,
+                "error_code": exc.error_code,
+                "message": "Groq API key is missing or invalid. Please check your backend server configuration.",
+                "retryable": False,
+                "trace_id": rid,
+            },
+        )
+    except GroqRateLimitError as exc:
+        logger.warning("[%s] Groq rate limit hit: %s", rid, exc)
+        transcript_metrics.record_groq_fallback(success=False)
+        transcript_metrics.record_final_result(success=False)
+        return JSONResponse(
+            status_code=429,
+            content={
+                "success": False,
+                "error_code": exc.error_code,
+                "message": exc.message,
+                "retryable": True,
+                "trace_id": rid,
+            },
+        )
+    except GroqTimeoutError as exc:
+        logger.warning("[%s] Groq timeout: %s", rid, exc)
+        transcript_metrics.record_groq_fallback(success=False)
+        transcript_metrics.record_final_result(success=False)
+        return JSONResponse(
+            status_code=504,
+            content={
+                "success": False,
+                "error_code": exc.error_code,
+                "message": exc.message,
+                "retryable": True,
+                "trace_id": rid,
+            },
+        )
+    except (GroqTranscriptionError, TranslationError) as exc:
+        logger.error("[%s] STT/Translation failed: %s", rid, exc)
+        transcript_metrics.record_groq_fallback(success=False)
+        transcript_metrics.record_final_result(success=False)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error_code": getattr(exc, "error_code", "TRANSCRIPTION_FAILED"),
+                "message": "We could not generate a transcript or translation for this video.",
+                "retryable": getattr(exc, "retryable", True),
+                "trace_id": rid,
+            },
+        )
+    except (TranscriptEmptyError, TranscriptValidationError) as exc:
+        logger.warning("[%s] Quality validation failed: %s", rid, exc)
+        transcript_metrics.record_final_result(success=False)
+        return JSONResponse(
+            status_code=422,
+            content={
+                "success": False,
+                "error_code": exc.error_code,
+                "message": exc.message,
+                "retryable": False,
+                "trace_id": rid,
+            },
+        )
+    except Exception as exc:
+        logger.exception("[%s] Unexpected error in unified transcript route: %s", rid, exc)
+        transcript_metrics.record_final_result(success=False)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error_code": "TRANSCRIPTION_FAILED",
+                "message": "An unexpected error occurred while acquiring the transcript.",
+                "retryable": True,
+                "trace_id": rid,
+            },
+        )
+
+
+@app.get("/api/transcript/metrics")
+async def api_transcript_metrics():
+    """Retrieve production transcript and STT monitoring metrics."""
+    from observability.transcript_metrics import transcript_metrics
+    return {
+        "success": True,
+        "metrics": transcript_metrics.get_snapshot(),
+    }
+
 
 @app.get("/api/transcript/{video_id}")
 async def api_transcript(video_id: str, language: str | None = None, force_refresh: bool = False, allow_whisper: bool = True) -> dict:

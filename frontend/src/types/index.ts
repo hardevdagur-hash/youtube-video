@@ -386,16 +386,12 @@ export interface TranscriptTab {
 }
 
 // Workflow types
-export type WorkflowStep = 'url' | 'metadata' | 'transcript' | 'analysis' | 'generate' | 'editor' | 'export';
+export type WorkflowStep = 'url' | 'metadata' | 'transcript';
 
 export const WORKFLOW_STEPS: { key: WorkflowStep; label: string; number: number }[] = [
   { key: 'url', label: 'Video URL', number: 1 },
   { key: 'metadata', label: 'Metadata', number: 2 },
   { key: 'transcript', label: 'Transcript', number: 3 },
-  { key: 'analysis', label: 'AI Analysis', number: 4 },
-  { key: 'generate', label: 'Blog Generation', number: 5 },
-  { key: 'editor', label: 'Editor', number: 6 },
-  { key: 'export', label: 'Export', number: 7 },
 ];
 
 // Phase 5 — Processing types
@@ -459,115 +455,6 @@ export interface ProcessingResult {
   error: string | null;
 }
 
-// Phase 6 — AI Content Analysis types
-
-export type SearchIntent =
-  | 'informational' | 'educational' | 'commercial' | 'transactional'
-  | 'navigational' | 'comparative' | 'review' | 'tutorial'
-  | 'opinion' | 'case_study' | 'research';
-
-export type ContentCategory =
-  | 'education' | 'technology' | 'finance' | 'healthcare' | 'politic' | 'career'
-  | 'programming' | 'ai' | 'machine_learning' | 'business' | 'marketing'
-  | 'lifestyle' | 'science' | 'entertainment' | 'sports' | 'news';
-
-export interface AnalysisSummary {
-  short: string;
-  executive: string;
-  detailed: string;
-  bullet_points: string[];
-  key_insights: string[];
-}
-
-export interface KeywordSet {
-  primary: string;
-  secondary: string[];
-  long_tail: string[];
-  semantic: string[];
-  lsi: string[];
-  related_topics: string[];
-  brand_names: string[];
-  products: string[];
-  technologies: string[];
-  frameworks: string[];
-}
-
-export interface EntitySet {
-  people: string[];
-  companies: string[];
-  organizations: string[];
-  universities: string[];
-  countries: string[];
-  cities: string[];
-  technologies: string[];
-  programming_languages: string[];
-  frameworks: string[];
-  books: string[];
-  courses: string[];
-  tools: string[];
-  products: string[];
-}
-
-export interface ContentOutline {
-  sections: string[];
-  introduction: string;
-  main_body: string[];
-  conclusion: string;
-}
-
-export interface QualityScores {
-  topic_coverage: number;
-  depth_score: number;
-  readability: number;
-  technical_complexity: number;
-  educational_value: number;
-  seo_potential: number;
-  evergreen_score: number;
-  engagement_potential: number;
-  confidence: number;
-}
-
-export interface ContentAnalysisResult {
-  success: boolean;
-  video_id: string;
-  primary_topic: string;
-  secondary_topics: string[];
-  category: ContentCategory;
-  subcategory: string;
-  content_type: string;
-  search_intent: SearchIntent;
-  intent_confidence: number;
-  target_audience: string;
-  experience_level: string;
-  industry: string;
-  difficulty: string;
-  content_purpose: string;
-  problem_statement: string;
-  main_solution: string;
-  key_takeaways: string[];
-  pain_points: string[];
-  opportunities: string[];
-  action_items: string[];
-  call_to_actions: string[];
-  learning_objectives: string[];
-  business_value: string;
-  educational_value: string;
-  summary: AnalysisSummary;
-  keywords: KeywordSet;
-  entities: EntitySet;
-  outline: ContentOutline;
-  quality: QualityScores;
-  analysis_time_ms: number;
-  llm_provider: string;
-  llm_model: string;
-  prompt_version: string;
-  total_tokens: number;
-  input_tokens: number;
-  output_tokens: number;
-  cost_estimate: number;
-  error: string | null;
-}
-
 export interface WorkflowState {
   currentStep: WorkflowStep;
   videoId: string | null;
@@ -579,8 +466,50 @@ export interface WorkflowState {
   selectedLanguage: string;
   processedTranscript: ProcessingResult | null;
   processingStatus: 'idle' | 'processing' | 'ok' | 'error';
-  analysis: ContentAnalysisResult | null;
-  analysisStatus: 'idle' | 'analyzing' | 'ok' | 'error';
   stepStatus: Record<WorkflowStep, 'pending' | 'running' | 'ok' | 'error' | 'skipped'>;
   error: string | null;
 }
+
+// --- Production Plan STT & Translation Types ---
+
+export type OutputLanguage = 'original' | 'en' | 'hi';
+
+export type PipelineStage =
+  | 'IDLE'
+  | 'VALIDATING'
+  | 'CHECKING_CACHE'
+  | 'FETCHING_CAPTIONS'
+  | 'CAPTIONS_UNAVAILABLE'
+  | 'EXTRACTING_AUDIO'
+  | 'TRANSCRIBING'
+  | 'CLEANING'
+  | 'VALIDATING_QUALITY'
+  | 'COMPLETED'
+  | 'FAILED';
+
+export interface UnifiedTranscriptSegment {
+  start: number;
+  end: number;
+  duration: number;
+  text: string;
+}
+
+export interface UnifiedTranscriptResponse {
+  success: boolean;
+  video_id: string;
+  title?: string | null;
+  source_language: string;
+  output_language: OutputLanguage;
+  provider: string;
+  transcript: string;
+  segments: UnifiedTranscriptSegment[];
+  word_count: number;
+  duration_seconds?: number | null;
+  confidence?: number;
+  from_cache?: boolean;
+  error_code?: string;
+  message?: string;
+  retryable?: boolean;
+}
+
+

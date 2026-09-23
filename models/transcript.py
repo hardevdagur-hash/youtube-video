@@ -14,6 +14,9 @@ class TranscriptProviderName(str, Enum):
     YOUTUBE_MANUAL = "youtube_manual"
     YOUTUBE_AUTO = "youtube_auto"
     FASTER_WHISPER = "faster_whisper"
+    YOUTUBE_CAPTIONS = "youtube_captions"
+    GROQ_WHISPER_LARGE_V3 = "groq_whisper_large_v3"
+    CACHE = "cache"
 
 
 class TranscriptSegment(BaseModel):
@@ -45,7 +48,7 @@ class TranscriptResult(BaseModel):
     success: bool = Field(default=True)
     video_id: str
     source: TranscriptSource = Field(default=TranscriptSource.MANUAL)
-    provider: TranscriptProviderName = Field(default=TranscriptProviderName.YOUTUBE_MANUAL)
+    provider: str = Field(default="youtube_captions")
     language: str = Field(default="en")
     language_confidence: float | None = Field(default=None)
     segments: list[TranscriptSegment] = Field(default_factory=list)

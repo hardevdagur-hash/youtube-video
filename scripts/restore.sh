@@ -2,10 +2,10 @@
 set -euo pipefail
 
 BACKUP_FILE="${1:-}"
-BACKUP_DIR="/opt/youtube-seo-blog/backups"
-COMPOSE_FILE="/opt/youtube-seo-blog/docker/docker-compose.yml"
+BACKUP_DIR="/opt/youtube-export-platform/backups"
+COMPOSE_FILE="/opt/youtube-export-platform/docker/docker-compose.yml"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-LOG_FILE="/opt/youtube-seo-blog/logs/restore-${TIMESTAMP}.log"
+LOG_FILE="/opt/youtube-export-platform/logs/restore-${TIMESTAMP}.log"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "${LOG_FILE}"; }
 
@@ -31,17 +31,17 @@ restore_database() {
     
     # Drop and recreate database
     docker compose -f "${COMPOSE_FILE}" exec -T postgres \
-        psql -U "${DB_USER:-ytblog}" -d postgres -c \
-        "DROP DATABASE IF EXISTS ${DB_NAME:-yt_blog};" 2>/dev/null || true
+        psql -U "${DB_USER:-ytplatform}" -d postgres -c \
+        "DROP DATABASE IF EXISTS ${DB_NAME:-yt_platform};" 2>/dev/null || true
     
     docker compose -f "${COMPOSE_FILE}" exec -T postgres \
-        psql -U "${DB_USER:-ytblog}" -d postgres -c \
-        "CREATE DATABASE ${DB_NAME:-yt_blog};"
+        psql -U "${DB_USER:-ytplatform}" -d postgres -c \
+        "CREATE DATABASE ${DB_NAME:-yt_platform};"
     
     # Restore from backup
     gunzip -c "${DB_BACKUP}" | \
         docker compose -f "${COMPOSE_FILE}" exec -T postgres \
-        psql -U "${DB_USER:-ytblog}" "${DB_NAME:-yt_blog}"
+        psql -U "${DB_USER:-ytplatform}" "${DB_NAME:-yt_platform}"
     
     log "Database restored"
     

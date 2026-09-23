@@ -23,7 +23,7 @@
       }
     ]
   },
-  "description": "Comprehensive overview dashboard for the YouTube SEO Blog Platform",
+  "description": "Comprehensive overview dashboard for the MATRIX YouTube Platform",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -1621,7 +1621,7 @@
     ]
   },
   "timezone": "browser",
-  "title": "YouTube SEO Blog - Platform Overview",
+  "title": "MATRIX YouTube Platform - Overview",
   "uid": "youtube-seo-overview",
   "version": 1,
   "weekStart": ""

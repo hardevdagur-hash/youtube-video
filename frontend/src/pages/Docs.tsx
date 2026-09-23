@@ -34,12 +34,6 @@ const endpoints = [
     category: 'Transcripts',
   },
   {
-    method: 'POST',
-    path: '/api/blog',
-    description: 'Execute the end-to-end AI blog generation pipeline: analysis, outline, sections, draft, and SEO.',
-    category: 'AI Blog',
-  },
-  {
     method: 'GET',
     path: '/api/metrics',
     description: 'Prometheus metrics endpoint for system observability, throughput, and error rates.',
@@ -61,7 +55,7 @@ export default function Docs() {
             MATRIX YouTube Platform API
           </h1>
           <p className="text-base text-gray-600 dark:text-gray-400">
-            Comprehensive reference for backend endpoints, async processing jobs, transcript extraction, and AI blog generation.
+            Comprehensive reference for backend endpoints, async processing jobs, channel metadata exports, and transcript extraction.
           </p>
           <div className="mt-6 flex justify-center gap-3">
             <a
@@ -95,7 +89,7 @@ export default function Docs() {
               <h4 className="font-bold text-gray-900 dark:text-white text-sm">Async Job Pipeline</h4>
             </div>
             <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed">
-              Long-running metadata exports and AI pipelines execute asynchronously via non-blocking background workers with real-time polling.
+              Long-running metadata exports execute asynchronously via non-blocking background workers with real-time polling.
             </p>
           </Card>
 

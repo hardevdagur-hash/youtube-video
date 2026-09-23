@@ -11,7 +11,7 @@ from observability.config import ObservabilityConfig
 class TestObservabilityConfig:
     def test_default_values(self):
         config = ObservabilityConfig()
-        assert config.service_name == "youtube-seo-blog-platform"
+        assert config.service_name == "youtube-export-platform"
         assert config.environment == "development"
         assert config.tracing_enabled is True
         assert config.metrics_enabled is True
@@ -38,6 +38,6 @@ class TestObservabilityConfig:
     def test_to_dict(self):
         config = ObservabilityConfig()
         d = config.to_dict()
-        assert d["service_name"] == "youtube-seo-blog-platform"
+        assert d["service_name"] == "youtube-export-platform"
         assert d["tracing_enabled"] is True
         assert d["health_check_port"] == 8080

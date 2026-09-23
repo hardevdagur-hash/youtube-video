@@ -6,7 +6,7 @@ const columns = [
     title: 'Product',
     links: [
       { label: 'Metadata Export', to: '/metadata' },
-      { label: 'AI Blog Generator', to: '/blog' },
+      { label: 'Transcript Extractor', to: '/transcript' },
     ],
   },
   {
@@ -37,7 +37,7 @@ export default function Footer() {
               <span className="font-bold text-gray-900 dark:text-white text-sm">YouTube Export</span>
             </Link>
             <p className="text-sm text-gray-500 dark:text-gray-400 leading-relaxed max-w-xs">
-              Export YouTube channel metadata or convert any video into AI-generated SEO blogs. Built with the YouTube Data API v3.
+              Export YouTube channel metadata and extract clean video transcripts with Whisper AI speech-to-text fallback. Built with the YouTube Data API v3.
             </p>
           </div>
 

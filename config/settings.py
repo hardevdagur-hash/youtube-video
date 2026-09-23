@@ -66,10 +66,15 @@ class Settings:
     # Required (validated at point of use)
     youtube_api_key: str = _get_env("YOUTUBE_API_KEY", "")
 
-    # Optional API keys for AI features
+    # Optional API key for speech-to-text fallback (Whisper API)
     openai_api_key: str = _get_env("OPENAI_API_KEY", "")
-    gemini_api_key: str = _get_env("GEMINI_API_KEY", "")
-    anthropic_api_key: str = _get_env("ANTHROPIC_API_KEY", "")
+
+    # Groq Settings (Primary Paid STT & On-Demand Translation)
+    groq_api_key: str = _get_env("GROQ_API_KEY", "")
+    groq_whisper_model: str = _get_env("GROQ_WHISPER_MODEL", "whisper-large-v3")
+    groq_translation_model: str = _get_env("GROQ_TRANSLATION_MODEL", "llama-3.3-70b-versatile")
+    groq_timeout_seconds: int = int(_get_env("GROQ_TIMEOUT_SECONDS", "120"))
+    groq_max_retries: int = int(_get_env("GROQ_MAX_RETRIES", "3"))
 
     # Application settings
     log_level: str = _get_env("LOG_LEVEL", "INFO").upper()
@@ -153,8 +158,11 @@ except Exception:
         rate_limit_per_minute = 30
         cors_origins = "*"
         openai_api_key = _get_env("OPENAI_API_KEY", "")
-        gemini_api_key = _get_env("GEMINI_API_KEY", "")
-        anthropic_api_key = _get_env("ANTHROPIC_API_KEY", "")
+        groq_api_key = _get_env("GROQ_API_KEY", "")
+        groq_whisper_model = _get_env("GROQ_WHISPER_MODEL", "whisper-large-v3")
+        groq_translation_model = _get_env("GROQ_TRANSLATION_MODEL", "llama-3.3-70b-versatile")
+        groq_timeout_seconds = int(_get_env("GROQ_TIMEOUT_SECONDS", "120"))
+        groq_max_retries = int(_get_env("GROQ_MAX_RETRIES", "3"))
     settings = _FallbackSettings()  # type: ignore[assignment]
 
 

@@ -35,9 +35,6 @@ class TestSettings(BaseSettings):
     """Directory containing golden (expected) output files."""
 
     # -- Mock flags -----------------------------------------------------------
-    MOCK_LLM: bool = True
-    """When True, replace all LLM API calls with deterministic mocks."""
-
     MOCK_YOUTUBE: bool = True
     """When True, replace YouTube API calls with canned responses."""
 
@@ -107,4 +104,4 @@ class TestSettings(BaseSettings):
     @property
     def use_mocks(self) -> bool:
         """Whether *any* external-service mocking is enabled."""
-        return self.MOCK_LLM or self.MOCK_YOUTUBE
+        return self.MOCK_YOUTUBE

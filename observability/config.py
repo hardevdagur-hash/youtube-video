@@ -8,7 +8,7 @@ from typing import Literal
 @dataclass
 class ObservabilityConfig:
     service_name: str = field(
-        default_factory=lambda: os.getenv("OTEL_SERVICE_NAME", "youtube-seo-blog-platform")
+        default_factory=lambda: os.getenv("OTEL_SERVICE_NAME", "youtube-export-platform")
     )
     service_version: str = field(
         default_factory=lambda: os.getenv("APP_VERSION", "1.0.0")

@@ -3,9 +3,9 @@ requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "youtube-seo-blog-platform"
+name = "youtube-export-platform"
 version = "1.0.0"
-description = "Enterprise AI YouTube to SEO Blog Platform with background processing, observability, and comprehensive testing"
+description = "Enterprise YouTube Channel Metadata & Video Transcript Platform with background processing, observability, and comprehensive testing"
 requires-python = ">=3.11"
 authors = [
     {name = "Rishi", email = "rishi@example.com"},

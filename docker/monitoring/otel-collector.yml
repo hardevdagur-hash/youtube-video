@@ -20,7 +20,7 @@ processors:
         value: production
         action: insert
       - key: service.name
-        value: youtube-seo-blog
+        value: youtube-export-platform
         action: insert
 
 exporters:

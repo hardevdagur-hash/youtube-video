@@ -5,7 +5,7 @@ from security.security_models import (
     MFAStatus, SessionStatus, User, Session, APIKey, SecurityEvent,
     ROLE_PERMISSIONS, SecurityError, AuthenticationError, AuthorizationError,
     RateLimitError, InvalidTokenError, TokenExpiredError, APIKeyError,
-    PromptInjectionError, ValidationError, ThreatDetectedError,
+    ValidationError, ThreatDetectedError,
 )
 from security.jwt_service import JWTService
 from security.oauth_service import OAuthService, OAuthProvider
@@ -17,7 +17,6 @@ from security.rate_limiter import SecurityRateLimiter
 from security.input_validator import InputValidator
 from security.output_sanitizer import OutputSanitizer
 from security.security_headers import SecurityHeadersMiddleware
-from security.prompt_security import PromptSecurity
 from security.audit_logger import SecurityAuditLogger
 from security.threat_detector import ThreatDetector
 from security.auth_manager import AuthManager
@@ -28,12 +27,13 @@ __all__ = [
     "MFAStatus", "SessionStatus", "User", "Session", "APIKey", "SecurityEvent",
     "ROLE_PERMISSIONS", "SecurityError", "AuthenticationError", "AuthorizationError",
     "RateLimitError", "InvalidTokenError", "TokenExpiredError", "APIKeyError",
-    "PromptInjectionError", "ValidationError", "ThreatDetectedError",
+    "ValidationError", "ThreatDetectedError",
     "JWTService", "OAuthService", "OAuthProvider",
     "RBACManager", "PermissionService",
     "APIKeyManager", "SecretManager",
     "SecurityRateLimiter", "InputValidator", "OutputSanitizer",
-    "SecurityHeadersMiddleware", "PromptSecurity",
+    "SecurityHeadersMiddleware",
     "SecurityAuditLogger", "ThreatDetector",
     "AuthManager", "SecurityMiddleware",
 ]
+

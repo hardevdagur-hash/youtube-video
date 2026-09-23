@@ -114,24 +114,6 @@ class RegressionEngine:
             )
         return results
 
-    def detect_seo_regression(
-        self,
-        baseline_seo: dict[str, float],
-        current_seo: dict[str, float],
-    ) -> list[RegressionResult]:
-        """Compare SEO-specific metric dictionaries.
-
-        Parameters
-        ----------
-        baseline_seo : dict
-        current_seo : dict
-
-        Returns
-        -------
-        list[RegressionResult]
-        """
-        return self.compare_metrics(baseline_seo, current_seo)
-
     def detect_performance_regression(
         self,
         baseline_perf: dict[str, float],

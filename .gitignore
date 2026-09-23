@@ -26,6 +26,8 @@ server2_stdout.txt
 # Webapp runtime
 webapp/runs/
 webapp/server.log
+data/transcripts/
+*.db
 
 # IDE
 .vscode/

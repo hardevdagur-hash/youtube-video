@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [v2.1.0] - 2026-09-21
+
+### Architectural Refactor: Complete Removal of MVP #3 (Video URL → AI Blog)
+
+- **Permanently Eliminated MVP #3 Workflow**:
+  - Completely removed all blog, SEO generation, prompt security, and content analysis modules.
+  - Deleted 22 Category A files spanning models (`blog_export.py`, `blog_generation.py`, `blog_review.py`, `content_analysis.py`, `seo_package.py`), schemas (`analysis_response.py`), exceptions (`blog_errors.py`, `seo_errors.py`, `analysis_errors.py`), security guardrails (`prompt_security.py`), fixtures, and mocks (`golden_outputs.yaml`, `mock_llm_provider.py`).
+  - Purged LLM exception hierarchy (`LLMProviderException`, `LLMAuthenticationException`, `LLMRateLimitException`, `LLMContextLengthException`, `LLMTimeoutException`).
+  - Purged unused LLM provider keys (`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`) from environment configuration; retained `OPENAI_API_KEY` strictly for Whisper STT audio fallback in MVP 2.
+  - Cleaned user analytics metrics (removed `blogs_generated` counter and `record_blog_generated`).
+  - Removed document export dependencies (`python-docx`, `fpdf2`) from `requirements-server.txt`.
+- **Frontend Streamlining**:
+  - Removed AI Blog workflow cards and navigation from React frontend (`Home.tsx`, `Docs.tsx`, `Footer.tsx`).
+  - Updated home page to a clean, balanced 2-column layout focusing on MVP 1 (Channel Metadata Export) and MVP 2 (Video Transcript Extraction with Whisper STT fallback).
+  - Cleaned TypeScript types in `frontend/src/types/index.ts` (removed Phase 6 content analysis and blog types).
+  - Cleaned Nginx configuration (`api.conf`).
+- **Retained & Verified Supported Workflows**:
+  - **MVP 1**: `YouTube Channel Handle → Channel/Video Metadata`
+  - **MVP 2**: `YouTube Video URL → Transcript` (with 8-Stage NLP & Hinglish Normalization)
+
+---
+
 ## [v2.0.0] - 2026-06-30
 
 ### Major Features
@@ -25,10 +47,9 @@ All notable changes to this project will be documented in this file.
 
 #### React SPA Frontend
 - **Complete rewrite** from single-page to multi-page SPA with React Router v7
-- **Home Page** — 3 workflow cards (Metadata Export, Transcript, AI Blog)
+- **Home Page** — Clean workflow cards (Metadata Export, Transcript Engine)
 - **Metadata Export Page** — channel input, progress polling, result display, CSV download
 - **Transcript Page** — URL input, metadata display, pipeline visualization, transcript viewer
-- **Blog Workflow** — 7-step stepper with state management (Steps 1-3 functional: URL, Metadata, Transcript)
 - **Dark Mode** — ThemeContext with localStorage persistence
 - **Reusable UI Components** — Button, Card, Badge, Container
 

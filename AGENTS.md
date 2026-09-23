@@ -1,5 +1,5 @@
 ## Goal
-- Transform the existing AI YouTube → SEO Blog Platform into a production-ready enterprise SaaS application with fully automated CI/CD, Docker containerization, zero-downtime deployments, health monitoring, disaster recovery, backup automation, observability, and security hardening — without modifying existing business logic.
+- Transform the existing MATRIX YouTube Platform into a production-ready enterprise application with fully automated CI/CD, Docker containerization, zero-downtime deployments, health monitoring, disaster recovery, backup automation, observability, and security hardening.
 
 ## Constraints & Preferences
 - DO NOT modify, rewrite, duplicate, or move existing business logic (Project Manager, Pipeline Orchestrator, KG Engine, SEO Engine, generators, editors, exporters, background processing, database, cache, security, observability, prompts, tests).
@@ -83,7 +83,7 @@
 - 240 Python test files (32,227 lines) across 20 test categories.
 - **Unit Tests (27 files, 744+ tests):** metadata, transcript, analysis, knowledge_graph, seo, outline, section, draft, review, optimization, editor, export engines + database, cache, security, prompt, background_processing, observability, utilities, repositories, services, validators, orchestrator, project_manager, pipeline.
 - **Integration Tests (11 files):** complete workflow, metadata→transcript, analysis→KG, SEO→outline, sections→draft, review→optimization, editor→export, database, cache, background_processing, pipeline orchestration.
-- **E2E Tests (9 files):** create project, generate blog, resume, retry, review/optimize, edit, export, delete, full user journey.
+- **E2E Tests (9 files):** channel export, transcript extraction, resume, retry, review, edit, export, delete, full user journey.
 - **Regression Tests (5 files):** pipeline, SEO, quality, output stability, AI regression.
 - **AI Regression Tests (7 files):** prompt quality, response quality, determinism, consistency, output structure, hallucination rate, semantic similarity.
 - **Performance Tests (8 files):** pipeline duration, stage duration, API latency, database, cache, worker throughput, export time, memory usage.

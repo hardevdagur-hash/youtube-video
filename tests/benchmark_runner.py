@@ -340,7 +340,7 @@ class PipelineBenchmark:
         Parameters
         ----------
         stage_name : str
-            E.g. ``"transcript"``, ``"analysis"``, ``"seo"``.
+            E.g. ``"transcript"``, ``"metadata"``.
 
         Returns
         -------

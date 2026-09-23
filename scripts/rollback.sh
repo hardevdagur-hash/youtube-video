@@ -4,7 +4,7 @@ set -euo pipefail
 ENVIRONMENT="${1:-production}"
 VERSION="${2:-}"
 COMPOSE_FILE="docker/docker-compose.yml"
-PROJECT_DIR="/opt/youtube-seo-blog"
+PROJECT_DIR="/opt/youtube-export-platform"
 BACKUP_DIR="${PROJECT_DIR}/backups"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="${PROJECT_DIR}/logs/rollback-${TIMESTAMP}.log"
@@ -33,7 +33,7 @@ rollback_to_backup() {
     if [ -n "${LATEST_BACKUP}" ]; then
         log "Restoring database from: ${LATEST_BACKUP}"
         docker compose -f "${COMPOSE_FILE}" exec -T postgres \
-            psql -U "${DB_USER:-ytblog}" "${DB_NAME:-yt_blog}" < "${LATEST_BACKUP}"
+            psql -U "${DB_USER:-ytplatform}" "${DB_NAME:-yt_platform}" < "${LATEST_BACKUP}"
         log "Database restored"
     else
         log "No backup found for database restore"

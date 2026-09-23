@@ -3,8 +3,8 @@
 Transforms raw transcript segments into clean, AI-ready content
 through a multi-stage processing pipeline.
 
-This is the canonical preprocessing layer for all downstream AI features:
-blog generation, SEO, RAG, embeddings, summarization, translation, etc.
+This is the canonical preprocessing layer for transcripts:
+punctuation restoration, capitalization correction, deduplication, and formatting.
 """
 
 import logging

@@ -4,6 +4,8 @@ import type {
   TranscriptSimpleResponse,
   ChannelVideoTranscriptSimple,
   TranscriptJobProgressData,
+  OutputLanguage,
+  UnifiedTranscriptResponse,
 } from '../types';
 
 const API_BASE = '/api';
@@ -85,6 +87,27 @@ class TranscriptService {
     targetLang: string,
   ): TranscriptResult | undefined {
     return this.translationCache.get(`${videoId}:${targetLang}`);
+  }
+
+  // Unified Production Transcript Endpoint — Captions first -> Groq Whisper Large V3 fallback -> Translation
+  async fetchUnifiedTranscript(
+    videoUrl: string,
+    outputLanguage: OutputLanguage = 'original'
+  ): Promise<UnifiedTranscriptResponse> {
+    console.log(`[TranscriptService] Fetching unified transcript for ${videoUrl} (lang=${outputLanguage})`);
+    const resp = await fetch(`${API_BASE}/transcript`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ video_url: videoUrl, output_language: outputLanguage }),
+    });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data?.success) {
+      const err = new Error(data?.message || `Server returned ${resp.status}`);
+      (err as any).error_code = data?.error_code || 'TRANSCRIPTION_FAILED';
+      (err as any).retryable = data?.retryable ?? true;
+      throw err;
+    }
+    return data as UnifiedTranscriptResponse;
   }
 
   // Simplified v2 — returns ONLY title, duration, transcript

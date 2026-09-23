@@ -1,16 +1,14 @@
-# AI Roadmap – YouTube URL → Transcript → SEO Blog Platform
+# AI Roadmap – YouTube URL → Transcript → Platform Architecture [ARCHIVED / DECOMMISSIONED]
 
-> **Status:** Planned
+> **Status:** Retired / Decommissioned (v2.1.0)
 >
-> **Priority:** High
+> **Priority:** Archived
 >
-> **Target Version:** v2.0
->
-> **Owner:** AI Platform
+> **Note:** MVP #3 (Video URL → AI Blog) was permanently removed. System strictly supports MVP 1 (Metadata) & MVP 2 (Transcript).
 
 ---
 
-# Vision
+# Vision (Historical)
 
 Transform the existing **YouTube Video Export Tool** into an **AI-powered Content Repurposing Platform** capable of converting any public YouTube video into high-quality SEO-optimized content with minimal user interaction.
 

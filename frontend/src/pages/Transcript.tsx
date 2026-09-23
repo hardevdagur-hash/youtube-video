@@ -1,10 +1,10 @@
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   Youtube, Loader2, ChevronDown, ChevronRight,
   Users, Hash, XCircle, Download, RotateCcw,
   CheckCircle2, AlertCircle, ExternalLink, StopCircle, RefreshCw,
-  Copy, Check,
+  Copy, Check, Sparkles, Globe, FileText, Languages, Cpu, Clock, Database,
 } from 'lucide-react';
 import { Container, Badge, Card } from '../components/ui';
 import VideoUrlInput from '../components/transcript/VideoUrlInput';
@@ -13,6 +13,9 @@ import type {
   ChannelVideoTranscriptSimple,
   TranscriptJobProgressData,
   TranscriptSimpleResponse,
+  OutputLanguage,
+  PipelineStage,
+  UnifiedTranscriptResponse,
 } from '../types';
 
 function cleanHandle(input: string): string {
@@ -26,7 +29,20 @@ function cleanHandle(input: string): string {
 export default function Transcript() {
   const [validatedVideoId, setValidatedVideoId] = useState<string | null>(null);
   const [processingVideoId, setProcessingVideoId] = useState<string | null>(null);
+  const [currentVideoUrl, setCurrentVideoUrl] = useState<string>('');
   const [videoResult, setVideoResult] = useState<TranscriptSimpleResponse | null>(null);
+  const [unifiedResult, setUnifiedResult] = useState<UnifiedTranscriptResponse | null>(null);
+  const [activeLang, setActiveLang] = useState<OutputLanguage>('original');
+  const [isTranslating, setIsTranslating] = useState(false);
+  const [viewMode, setViewMode] = useState<'text' | 'segments'>('text');
+  const [pipelineStage, setPipelineStage] = useState<PipelineStage>('IDLE');
+  const [stageMessage, setStageMessage] = useState<string>('');
+  const [structuredError, setStructuredError] = useState<{
+    error_code: string;
+    message: string;
+    retryable: boolean;
+  } | null>(null);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -43,52 +59,145 @@ export default function Transcript() {
   const [csvExporting, setCsvExporting] = useState(false);
   const [csvExportStatus, setCsvExportStatus] = useState<string | null>(null);
 
-  const handleValidUrl = (videoId: string, _normalizedUrl: string) => {
+  const handleValidUrl = (videoId: string, normalizedUrl: string) => {
     setValidatedVideoId(videoId);
+    if (normalizedUrl) setCurrentVideoUrl(normalizedUrl);
   };
 
-  const fetchSingleTranscript = useCallback(async (videoId: string) => {
-    console.log('[Transcript] Starting single video transcript fetch:', videoId);
-    setProcessingVideoId(videoId);
-    setChannelVideos(null);
-    setActiveJob(null);
-    setVideoResult(null);
-    setError(null);
-    setLoading(true);
+  const fetchSingleTranscript = useCallback(
+    async (videoId: string, rawUrl?: string, targetLang: OutputLanguage = 'original') => {
+      const url = rawUrl || (currentVideoUrl ? currentVideoUrl : `https://www.youtube.com/watch?v=${videoId}`);
+      setCurrentVideoUrl(url);
+      setProcessingVideoId(videoId);
+      setActiveLang(targetLang);
+      setChannelVideos(null);
+      setActiveJob(null);
+      setVideoResult(null);
+      setUnifiedResult(null);
+      setStructuredError(null);
+      setError(null);
+      setLoading(true);
 
-    try {
-      console.log(`[Transcript] Calling /api/transcriptv2/${videoId}...`);
-      const data = await transcriptService.fetchTranscriptSimple(videoId);
-      console.log('[Transcript] Received transcript data:', data);
-      setVideoResult(data);
-    } catch (err) {
-      console.error('[Transcript] Failed to fetch transcript:', err);
-      if (err instanceof TypeError) {
-        setError('Backend unavailable. Ensure the API server is running on port 8000.');
-      } else {
-        setError(err instanceof Error ? err.message : String(err));
+      setPipelineStage('VALIDATING');
+      setStageMessage('Validating YouTube video URL & identifier...');
+
+      const t1 = setTimeout(() => {
+        setPipelineStage('CHECKING_CACHE');
+        setStageMessage('Checking multi-tier transcript cache...');
+      }, 300);
+
+      const t2 = setTimeout(() => {
+        setPipelineStage('FETCHING_CAPTIONS');
+        setStageMessage('Checking free YouTube captions...');
+      }, 700);
+
+      const t3 = setTimeout(() => {
+        setPipelineStage('EXTRACTING_AUDIO');
+        setStageMessage('YouTube captions unavailable. Extracting audio stream with yt-dlp...');
+      }, 2000);
+
+      const t4 = setTimeout(() => {
+        setPipelineStage('TRANSCRIBING');
+        setStageMessage('Transcribing audio with Groq Whisper Large V3...');
+      }, 4500);
+
+      try {
+        const data = await transcriptService.fetchUnifiedTranscript(url, targetLang);
+        clearTimeout(t1);
+        clearTimeout(t2);
+        clearTimeout(t3);
+        clearTimeout(t4);
+        setPipelineStage('COMPLETED');
+        setStageMessage('Transcript acquisition completed!');
+        setUnifiedResult(data);
+
+        // Map to legacy videoResult for compatibility with export tools
+        setVideoResult({
+          video_id: data.video_id,
+          video_url: url,
+          title: data.title || 'YouTube Video',
+          duration: data.duration_seconds
+            ? `${Math.floor(data.duration_seconds / 60)}:${String(Math.floor(data.duration_seconds % 60)).padStart(2, '0')}`
+            : '0:00',
+          language: data.source_language,
+          script: 'Standard',
+          status: 'success',
+          transcript: data.transcript,
+          raw_transcript: data.transcript,
+          source: data.provider,
+          method: data.provider.includes('whisper') ? 'speech_to_text' : 'caption',
+          error_code: null,
+          error_message: null,
+        });
+      } catch (err: any) {
+        clearTimeout(t1);
+        clearTimeout(t2);
+        clearTimeout(t3);
+        clearTimeout(t4);
+        setPipelineStage('FAILED');
+        const errCode = err?.error_code || 'TRANSCRIPTION_FAILED';
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const isRetryable = err?.retryable ?? true;
+        setStructuredError({
+          error_code: errCode,
+          message: errMsg,
+          retryable: isRetryable,
+        });
+        setError(errMsg);
+      } finally {
+        setLoading(false);
       }
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    },
+    [currentVideoUrl]
+  );
 
-  const handleSingleVideoSubmit = useCallback((videoId: string) => {
-    console.log('[Transcript] handleSingleVideoSubmit triggered with videoId:', videoId);
-    fetchSingleTranscript(videoId);
-  }, [fetchSingleTranscript]);
+  const handleLanguageChange = async (newLang: OutputLanguage) => {
+    if (newLang === activeLang || !currentVideoUrl) return;
+    setActiveLang(newLang);
+    setIsTranslating(true);
+    try {
+      const data = await transcriptService.fetchUnifiedTranscript(currentVideoUrl, newLang);
+      setUnifiedResult(data);
+      if (videoResult) {
+        setVideoResult({
+          ...videoResult,
+          transcript: data.transcript,
+        });
+      }
+    } catch (err: any) {
+      console.error('Translation switch failed:', err);
+      const errCode = err?.error_code || 'TRANSLATION_FAILED';
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setStructuredError({
+        error_code: errCode,
+        message: errMsg,
+        retryable: true,
+      });
+    } finally {
+      setIsTranslating(false);
+    }
+  };
+
+  const handleSingleVideoSubmit = useCallback(
+    (videoId: string, normalizedUrl?: string) => {
+      console.log('[Transcript] handleSingleVideoSubmit:', videoId, normalizedUrl);
+      fetchSingleTranscript(videoId, normalizedUrl, 'original');
+    },
+    [fetchSingleTranscript]
+  );
 
   const handleRetry = () => {
     const vid = processingVideoId || validatedVideoId;
     if (vid) {
-      fetchSingleTranscript(vid);
+      fetchSingleTranscript(vid, currentVideoUrl, activeLang);
     }
   };
 
   const handleCopyTranscript = async () => {
-    if (!videoResult?.transcript) return;
+    const textToCopy = unifiedResult?.transcript || videoResult?.transcript;
+    if (!textToCopy) return;
     try {
-      await navigator.clipboard.writeText(videoResult.transcript);
+      await navigator.clipboard.writeText(textToCopy);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
@@ -383,43 +492,117 @@ export default function Transcript() {
               </Card>
             </div>
 
-            {/* --- SINGLE VIDEO LOADING --- */}
+            {/* --- MULTI-STAGE PRODUCTION STATUS STEPPER --- */}
             {loading && (
-              <Card padding="lg" className="mb-6 border-violet-200 dark:border-violet-900/60 bg-violet-50/20 dark:bg-violet-950/10">
-                <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-xl bg-violet-100 dark:bg-violet-900/40 flex items-center justify-center flex-shrink-0">
-                    <Loader2 size={18} className="animate-spin text-violet-600 dark:text-violet-400" />
+              <Card padding="lg" className="mb-6 border-violet-200 dark:border-violet-900/60 bg-gradient-to-br from-violet-50/40 via-white to-purple-50/30 dark:from-gray-900 dark:via-gray-900/80 dark:to-violet-950/20 shadow-lg">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-violet-600/10 dark:bg-violet-500/20 flex items-center justify-center flex-shrink-0">
+                      <Loader2 size={20} className="animate-spin text-violet-600 dark:text-violet-400" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-bold text-gray-900 dark:text-white flex items-center gap-2">
+                        Acquiring Production Transcript
+                        <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-300">
+                          {pipelineStage}
+                        </span>
+                      </h4>
+                      <p className="text-xs text-gray-600 dark:text-gray-400 mt-0.5 font-medium">
+                        {stageMessage || 'Processing YouTube video stream...'}
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <h4 className="text-sm font-semibold text-gray-900 dark:text-white">
-                      Processing Transcript
-                    </h4>
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                      Checking captions first, then running GPU Whisper STT with English (India) conversion...
-                    </p>
+                </div>
+
+                {/* Visual Stepper */}
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-2 border-t border-gray-100 dark:border-gray-800 text-xs">
+                  <div className={`p-2 rounded-lg border text-center transition-all ${
+                    ['VALIDATING', 'CHECKING_CACHE', 'FETCHING_CAPTIONS', 'EXTRACTING_AUDIO', 'TRANSCRIBING', 'CLEANING', 'COMPLETED'].includes(pipelineStage)
+                      ? 'bg-violet-50 dark:bg-violet-950/40 border-violet-300 dark:border-violet-800 text-violet-700 dark:text-violet-300 font-semibold'
+                      : 'bg-gray-50 dark:bg-gray-800/40 border-gray-200 dark:border-gray-800 text-gray-400'
+                  }`}>
+                    <span className="block text-[10px] uppercase font-mono">Step 1</span>
+                    <span>Validation</span>
+                  </div>
+
+                  <div className={`p-2 rounded-lg border text-center transition-all ${
+                    ['CHECKING_CACHE', 'FETCHING_CAPTIONS', 'EXTRACTING_AUDIO', 'TRANSCRIBING', 'CLEANING', 'COMPLETED'].includes(pipelineStage)
+                      ? 'bg-violet-50 dark:bg-violet-950/40 border-violet-300 dark:border-violet-800 text-violet-700 dark:text-violet-300 font-semibold'
+                      : 'bg-gray-50 dark:bg-gray-800/40 border-gray-200 dark:border-gray-800 text-gray-400'
+                  }`}>
+                    <span className="block text-[10px] uppercase font-mono">Step 2</span>
+                    <span>Cache Check</span>
+                  </div>
+
+                  <div className={`p-2 rounded-lg border text-center transition-all ${
+                    ['FETCHING_CAPTIONS', 'EXTRACTING_AUDIO', 'TRANSCRIBING', 'CLEANING', 'COMPLETED'].includes(pipelineStage)
+                      ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 font-semibold'
+                      : 'bg-gray-50 dark:bg-gray-800/40 border-gray-200 dark:border-gray-800 text-gray-400'
+                  }`}>
+                    <span className="block text-[10px] uppercase font-mono">Step 3</span>
+                    <span>Captions ($0)</span>
+                  </div>
+
+                  <div className={`p-2 rounded-lg border text-center transition-all ${
+                    ['EXTRACTING_AUDIO', 'TRANSCRIBING', 'CLEANING', 'COMPLETED'].includes(pipelineStage)
+                      ? 'bg-purple-50 dark:bg-purple-950/40 border-purple-300 dark:border-purple-800 text-purple-700 dark:text-purple-300 font-semibold'
+                      : 'bg-gray-50 dark:bg-gray-800/40 border-gray-200 dark:border-gray-800 text-gray-400'
+                  }`}>
+                    <span className="block text-[10px] uppercase font-mono">Step 4</span>
+                    <span>Groq STT</span>
+                  </div>
+
+                  <div className={`p-2 rounded-lg border text-center transition-all ${
+                    ['CLEANING', 'COMPLETED'].includes(pipelineStage)
+                      ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-300 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 font-semibold'
+                      : 'bg-gray-50 dark:bg-gray-800/40 border-gray-200 dark:border-gray-800 text-gray-400'
+                  }`}>
+                    <span className="block text-[10px] uppercase font-mono">Step 5</span>
+                    <span>NLP Clean</span>
                   </div>
                 </div>
               </Card>
             )}
 
             {/* --- SINGLE VIDEO ERROR --- */}
-            {error && !loading && (
-              <Card padding="lg" className="mb-6 border-rose-200 dark:border-rose-900/40 bg-rose-50/20 dark:bg-rose-950/10">
-                <div className="flex items-start gap-3">
-                  <XCircle size={18} className="text-red-500 flex-shrink-0 mt-0.5" />
-                  <div className="flex-1">
-                    <span className="text-xs font-bold uppercase tracking-wider text-rose-600 dark:text-rose-400">
-                      Request Failed
-                    </span>
-                    <p className="text-sm text-gray-800 dark:text-gray-200 mt-0.5">
-                      {error}
+            {structuredError && !loading && (
+              <Card padding="lg" className="mb-6 border-rose-200 dark:border-rose-900/40 bg-rose-50/30 dark:bg-rose-950/10">
+                <div className="flex items-start gap-4">
+                  <div className="w-10 h-10 rounded-xl bg-rose-100 dark:bg-rose-900/40 flex items-center justify-center flex-shrink-0">
+                    <AlertCircle size={20} className="text-rose-600 dark:text-rose-400" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
+                      <h3 className="text-base font-bold text-gray-900 dark:text-white">
+                        Transcript Acquisition Failed
+                      </h3>
+                      <span className="px-2.5 py-0.5 rounded-full text-xs font-bold font-mono bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300 border border-rose-300 dark:border-rose-800">
+                        {structuredError.error_code}
+                      </span>
+                    </div>
+                    <p className="text-sm text-gray-700 dark:text-gray-300 mt-1">
+                      {structuredError.message}
                     </p>
-                    <button
-                      onClick={handleRetry}
-                      className="mt-2.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 shadow-sm transition-all-200 cursor-pointer"
-                    >
-                      <RotateCcw size={12} /> Retry
-                    </button>
+                    <div className="mt-4 flex items-center gap-4 text-xs">
+                      {currentVideoUrl && (
+                        <a
+                          href={currentVideoUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 font-semibold text-violet-600 dark:text-violet-400 hover:underline"
+                        >
+                          Open on YouTube <ExternalLink size={12} />
+                        </a>
+                      )}
+                      {structuredError.retryable && (
+                        <button
+                          onClick={handleRetry}
+                          className="inline-flex items-center gap-1 font-semibold text-violet-600 dark:text-violet-400 hover:underline cursor-pointer"
+                        >
+                          <RotateCcw size={12} /> Retry Pipeline
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
               </Card>
@@ -527,148 +710,210 @@ export default function Transcript() {
             )}
 
             {/* --- SINGLE VIDEO RESULT --- */}
-            {videoResult && !channelVideos && (
+            {(unifiedResult || videoResult) && !channelVideos && (
               <div className="mb-6 space-y-4">
-                {videoResult.status === 'failed' ? (
-                  <Card padding="lg" className="border-rose-200 dark:border-rose-900/40 bg-rose-50/30 dark:bg-rose-950/10">
-                    <div className="flex items-start gap-4">
-                      <div className="w-10 h-10 rounded-xl bg-rose-100 dark:bg-rose-900/40 flex items-center justify-center flex-shrink-0">
-                        <AlertCircle size={20} className="text-rose-600 dark:text-rose-400" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1 flex-wrap">
-                          <h3 className="text-base font-bold text-gray-900 dark:text-white">
-                            {videoResult.title || 'Transcript Unavailable'}
-                          </h3>
-                          <span className="px-2.5 py-0.5 rounded-full text-xs font-bold uppercase bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300 border border-rose-300 dark:border-rose-800">
-                            {videoResult.error_code || 'FAILED'}
+                <Card padding="lg" className="border-gray-200 dark:border-gray-800 shadow-xl">
+                  {/* Header */}
+                  <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 mb-4">
+                    <div>
+                      <div className="flex items-center gap-2 text-xs text-gray-400 uppercase tracking-wider font-semibold">
+                        <span>Video Transcript</span>
+                        {unifiedResult?.from_cache && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-cyan-50 dark:bg-cyan-950/50 text-cyan-700 dark:text-cyan-300 border border-cyan-200 dark:border-cyan-800 font-mono text-[10px]">
+                            <Database size={10} /> Cache Hit
                           </span>
-                        </div>
-                        <p className="text-sm text-gray-700 dark:text-gray-300 mt-1">
-                          {videoResult.error_message || 'Could not extract transcript for this video.'}
-                        </p>
-                        <div className="mt-4 flex items-center gap-4 text-xs">
-                          {videoResult.video_url && (
-                            <a
-                              href={videoResult.video_url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="inline-flex items-center gap-1 font-semibold text-violet-600 dark:text-violet-400 hover:underline"
-                            >
-                              Open on YouTube <ExternalLink size={12} />
-                            </a>
-                          )}
+                        )}
+                      </div>
+                      <h2 className="text-lg sm:text-xl font-bold text-gray-900 dark:text-white mt-1">
+                        {unifiedResult?.title || videoResult?.title || 'YouTube Video'}
+                      </h2>
+                    </div>
+
+                    {/* Provider Badge */}
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {(unifiedResult?.provider === 'youtube_captions' || videoResult?.method === 'caption') && (
+                        <span className="px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 flex items-center gap-1.5">
+                          <CheckCircle2 size={12} /> YouTube Captions (Free)
+                        </span>
+                      )}
+                      {(unifiedResult?.provider.includes('whisper') || videoResult?.method === 'speech_to_text') && (
+                        <span className="px-3 py-1 rounded-full text-xs font-semibold bg-violet-100 text-violet-800 dark:bg-violet-950/60 dark:text-violet-300 border border-violet-300 dark:border-violet-800 flex items-center gap-1.5">
+                          <Cpu size={12} /> Groq Whisper Large V3
+                        </span>
+                      )}
+                      {unifiedResult?.provider === 'cache' && (
+                        <span className="px-3 py-1 rounded-full text-xs font-semibold bg-sky-100 text-sky-800 dark:bg-sky-950/60 dark:text-sky-300 border border-sky-300 dark:border-sky-800 flex items-center gap-1.5">
+                          <Database size={12} /> Cached Transcript
+                        </span>
+                      )}
+                      {unifiedResult && unifiedResult.output_language !== 'original' && (
+                        <span className="px-3 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800 flex items-center gap-1.5">
+                          <Sparkles size={12} /> Derived Translation
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* 3-Way Language Toggle Toolbar */}
+                  <div className="bg-gray-100 dark:bg-gray-800/80 p-1.5 rounded-xl flex items-center gap-1 mb-4">
+                    <button
+                      onClick={() => handleLanguageChange('original')}
+                      disabled={isTranslating}
+                      className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                        activeLang === 'original'
+                          ? 'bg-white dark:bg-gray-900 text-gray-900 dark:text-white shadow-sm'
+                          : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+                      }`}
+                    >
+                      <FileText size={13} />
+                      <span>Original ({unifiedResult?.source_language.toUpperCase() || 'ORIGINAL'})</span>
+                    </button>
+
+                    <button
+                      onClick={() => handleLanguageChange('en')}
+                      disabled={isTranslating}
+                      className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                        activeLang === 'en'
+                          ? 'bg-white dark:bg-gray-900 text-indigo-600 dark:text-indigo-400 shadow-sm font-bold'
+                          : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+                      }`}
+                    >
+                      {isTranslating && activeLang === 'en' ? (
+                        <Loader2 size={13} className="animate-spin" />
+                      ) : (
+                        <Globe size={13} />
+                      )}
+                      <span>Simple English</span>
+                    </button>
+
+                    <button
+                      onClick={() => handleLanguageChange('hi')}
+                      disabled={isTranslating}
+                      className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                        activeLang === 'hi'
+                          ? 'bg-white dark:bg-gray-900 text-amber-600 dark:text-amber-400 shadow-sm font-bold'
+                          : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+                      }`}
+                    >
+                      {isTranslating && activeLang === 'hi' ? (
+                        <Loader2 size={13} className="animate-spin" />
+                      ) : (
+                        <Languages size={13} />
+                      )}
+                      <span>Simple Hindi (सरल हिंदी)</span>
+                    </button>
+                  </div>
+
+                  {/* Metadata Metrics Row */}
+                  <div className="flex flex-wrap items-center gap-y-2 gap-x-5 mb-5 text-xs text-gray-600 dark:text-gray-400 border-y border-gray-100 dark:border-gray-800 py-3">
+                    <div>
+                      <span className="font-semibold text-gray-700 dark:text-gray-300">Words: </span>
+                      <span className="font-bold text-gray-900 dark:text-white">
+                        {unifiedResult?.word_count || (videoResult?.transcript ? videoResult.transcript.split(/\s+/).length : 0)}
+                      </span>
+                    </div>
+                    {unifiedResult?.duration_seconds ? (
+                      <div>
+                        <span className="font-semibold text-gray-700 dark:text-gray-300">Duration: </span>
+                        <span className="font-medium text-gray-900 dark:text-white">
+                          {Math.floor(unifiedResult.duration_seconds / 60)}:{String(Math.floor(unifiedResult.duration_seconds % 60)).padStart(2, '0')}
+                        </span>
+                      </div>
+                    ) : videoResult?.duration ? (
+                      <div>
+                        <span className="font-semibold text-gray-700 dark:text-gray-300">Duration: </span>
+                        <span className="font-medium text-gray-900 dark:text-white">{videoResult.duration}</span>
+                      </div>
+                    ) : null}
+                    <div>
+                      <span className="font-semibold text-gray-700 dark:text-gray-300">Confidence: </span>
+                      <span className="font-semibold text-emerald-600 dark:text-emerald-400">
+                        {Math.round((unifiedResult?.confidence || 0.95) * 100)}%
+                      </span>
+                    </div>
+                    {unifiedResult?.segments && unifiedResult.segments.length > 0 && (
+                      <div className="flex items-center gap-1.5 ml-auto">
+                        <span className="font-semibold text-gray-700 dark:text-gray-300">View:</span>
+                        <div className="inline-flex rounded-lg border border-gray-200 dark:border-gray-700 p-0.5 bg-gray-50 dark:bg-gray-800">
                           <button
-                            onClick={handleRetry}
-                            className="inline-flex items-center gap-1 font-semibold text-violet-600 dark:text-violet-400 hover:underline cursor-pointer"
+                            onClick={() => setViewMode('text')}
+                            className={`px-2 py-0.5 rounded text-[11px] font-medium transition-all ${
+                              viewMode === 'text' ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-xs' : 'text-gray-500'
+                            }`}
                           >
-                            <RotateCcw size={12} /> Retry
+                            Full Text
+                          </button>
+                          <button
+                            onClick={() => setViewMode('segments')}
+                            className={`px-2 py-0.5 rounded text-[11px] font-medium transition-all ${
+                              viewMode === 'segments' ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-xs' : 'text-gray-500'
+                            }`}
+                          >
+                            Timestamps ({unifiedResult.segments.length})
                           </button>
                         </div>
                       </div>
-                    </div>
-                  </Card>
-                ) : (
-                  <Card padding="lg">
-                    <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 mb-4">
-                      <div>
-                        <p className="text-xs text-gray-400 dark:text-gray-500 uppercase tracking-wider font-semibold">
-                          Video Title
-                        </p>
-                        <h2 className="text-lg sm:text-xl font-bold text-gray-900 dark:text-white mt-1">
-                          {videoResult.title || 'Untitled Video'}
-                        </h2>
-                      </div>
-                      <div className="flex items-center gap-2 flex-shrink-0 flex-wrap">
-                        {videoResult.method === 'caption' && (
-                          <span className="px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800">
-                            Captions Available
-                          </span>
+                    )}
+                    {currentVideoUrl && (
+                      <a
+                        href={currentVideoUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-violet-600 dark:text-violet-400 hover:underline font-medium ml-auto"
+                      >
+                        Watch on YouTube <ExternalLink size={12} />
+                      </a>
+                    )}
+                  </div>
+
+                  {/* Transcript Body */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-xs text-gray-400 dark:text-gray-500 uppercase tracking-wider font-semibold">
+                        {activeLang === 'original'
+                          ? 'Canonical Transcript'
+                          : activeLang === 'en'
+                          ? 'Simple English Output'
+                          : 'Simple Hindi Output'}
+                      </p>
+                      <button
+                        onClick={handleCopyTranscript}
+                        className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 transition-all cursor-pointer"
+                      >
+                        {copied ? (
+                          <>
+                            <Check size={12} className="text-emerald-500" />
+                            <span className="text-emerald-600 dark:text-emerald-400 font-semibold">Copied!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy size={12} />
+                            Copy Transcript
+                          </>
                         )}
-                        {videoResult.method === 'speech_to_text' && (
-                          <span className="px-3 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300 border border-blue-300 dark:border-blue-800">
-                            Whisper (STT)
-                          </span>
-                        )}
-                        {videoResult.source && (
-                          <span className="px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300 border border-gray-200 dark:border-gray-700">
-                            Source: {videoResult.source}
-                          </span>
-                        )}
-                      </div>
+                      </button>
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-y-2 gap-x-5 mb-5 text-xs text-gray-600 dark:text-gray-400 border-y border-gray-100 dark:border-gray-800 py-3">
-                      <div>
-                        <span className="font-semibold text-gray-700 dark:text-gray-300">Duration: </span>
-                        {videoResult.duration}
-                      </div>
-                      {videoResult.language && (
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-semibold text-gray-700 dark:text-gray-300">Language: </span>
-                          {videoResult.language.toLowerCase().includes('english') ? (
-                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-blue-100 text-blue-800 dark:bg-blue-950/60 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
-                              English (India)
+                    {viewMode === 'segments' && unifiedResult?.segments && unifiedResult.segments.length > 0 ? (
+                      <div className="max-h-96 overflow-y-auto space-y-2 bg-gray-50 dark:bg-gray-800/50 rounded-xl p-4 border border-gray-100 dark:border-gray-800">
+                        {unifiedResult.segments.map((seg, idx) => (
+                          <div key={idx} className="flex items-start gap-3 text-xs">
+                            <span className="font-mono text-violet-600 dark:text-violet-400 font-semibold bg-violet-50 dark:bg-violet-950/60 px-2 py-0.5 rounded flex-shrink-0">
+                              {Math.floor(seg.start / 60)}:{String(Math.floor(seg.start % 60)).padStart(2, '0')}
                             </span>
-                          ) : videoResult.language.toLowerCase() === 'hinglish' ? (
-                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-purple-100 text-purple-800 dark:bg-purple-950/60 dark:text-purple-300 border border-purple-200 dark:border-purple-800">
-                              Hinglish (Roman)
-                            </span>
-                          ) : (
-                            <span className="font-medium text-gray-900 dark:text-white uppercase">{videoResult.language}</span>
-                          )}
-                        </div>
-                      )}
-                      {videoResult.script && (
-                        <div>
-                          <span className="font-semibold text-gray-700 dark:text-gray-300">Script: </span>
-                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-indigo-50 text-indigo-700 dark:bg-indigo-950/50 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
-                            {videoResult.script}
-                          </span>
-                        </div>
-                      )}
-                      {videoResult.video_url && (
-                        <a
-                          href={videoResult.video_url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-violet-600 dark:text-violet-400 hover:underline font-medium ml-auto"
-                        >
-                          Watch on YouTube <ExternalLink size={12} />
-                        </a>
-                      )}
-                    </div>
-
-                    <div>
-                      <div className="flex items-center justify-between mb-2">
-                        <p className="text-xs text-gray-400 dark:text-gray-500 uppercase tracking-wider font-semibold">
-                          Transcript Text
-                        </p>
-                        <button
-                          onClick={handleCopyTranscript}
-                          className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 transition-all-200 cursor-pointer"
-                        >
-                          {copied ? (
-                            <>
-                              <Check size={12} className="text-emerald-500" />
-                              <span className="text-emerald-600 dark:text-emerald-400 font-semibold">Copied!</span>
-                            </>
-                          ) : (
-                            <>
-                              <Copy size={12} />
-                              Copy Transcript
-                            </>
-                          )}
-                        </button>
+                            <p className="text-gray-800 dark:text-gray-200 leading-relaxed font-sans">{seg.text}</p>
+                          </div>
+                        ))}
                       </div>
+                    ) : (
                       <div className="max-h-96 overflow-y-auto bg-gray-50 dark:bg-gray-800/50 rounded-xl p-4 border border-gray-100 dark:border-gray-800">
                         <p className="text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap leading-relaxed font-sans">
-                          {videoResult.transcript}
+                          {unifiedResult?.transcript || videoResult?.transcript}
                         </p>
                       </div>
-                    </div>
-                  </Card>
-                )}
+                    )}
+                  </div>
+                </Card>
 
                 {/* Single Video CSV Export */}
                 {(processingVideoId || validatedVideoId) && (

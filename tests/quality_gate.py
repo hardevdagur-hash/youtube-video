@@ -66,7 +66,6 @@ class QualityGate:
     #: Default gate names and their thresholds.
     ALL_GATES: dict[str, float] = {
         "coverage": 95.0,
-        "seo_score": 90.0,
         "grammar_score": 95.0,
         "readability_score": 80.0,
         "regression_drift": 0.1,
@@ -103,33 +102,6 @@ class QualityGate:
             score=coverage_pct,
             threshold=threshold,
             severity="critical",
-        )
-
-    @staticmethod
-    def check_seo_score(
-        score: float,
-        threshold: float = 90.0,
-    ) -> QualityGateResult:
-        """Check that the computed SEO score meets the threshold.
-
-        Parameters
-        ----------
-        score : float
-            SEO score (0-100).
-        threshold : float
-            Minimum acceptable score (default 90.0).
-
-        Returns
-        -------
-        QualityGateResult
-        """
-        passed = score >= threshold
-        return QualityGateResult(
-            name="seo_score",
-            passed=passed,
-            score=score,
-            threshold=threshold,
-            severity="high",
         )
 
     @staticmethod
@@ -370,8 +342,6 @@ class QualityGate:
         if "coverage" in results_dict:
             gates.append(self.check_coverage(float(results_dict["coverage"])))
 
-        if "seo_score" in results_dict:
-            gates.append(self.check_seo_score(float(results_dict["seo_score"])))
 
         if "grammar_score" in results_dict:
             gates.append(self.check_grammar_score(float(results_dict["grammar_score"])))

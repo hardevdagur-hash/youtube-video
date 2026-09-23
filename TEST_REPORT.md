@@ -5,8 +5,8 @@
 - **Date:** 2026-07-01  
 - **Python:** 3.12.10  
 - **pytest:** 9.1.0  
-- **Result:** 717 passed, 0 failed, 0 skipped  
-- **Duration:** 29.85s  
+- **Result:** 604 passed, 0 failed, 0 skipped  
+- **Duration:** 24.15s  
 
 ---
 
@@ -14,9 +14,7 @@
 
 | Test File | Tests | Status |
 |-----------|-------|--------|
-| `tests/test_blog_generation.py` | 87 | ✅ ALL PASS |
 | `tests/test_channel_lookup.py` | 20 | ✅ ALL PASS |
-| `tests/test_content_analysis.py` | 26 | ✅ ALL PASS |
 | `tests/test_data_transformer.py` | — | ✅ Covered |
 | `tests/test_exporter.py` | — | ✅ Covered |
 | `tests/test_video_discovery.py` | 12 | ✅ ALL PASS |
@@ -24,7 +22,7 @@
 | `tests/test_youtube_client.py` | 8 | ✅ ALL PASS |
 | `tests/test_youtube_metadata.py` | 24 | ✅ ALL PASS |
 | `tests/test_youtube_url_parser.py` | 100+ | ✅ ALL PASS |
-| **TOTAL** | **717** | **✅ 717/717** |
+| **TOTAL** | **604** | **✅ 604/604** |
 
 ---
 

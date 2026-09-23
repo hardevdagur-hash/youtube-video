@@ -15,7 +15,7 @@ services:
       APP_ENV: development
       LOG_LEVEL: DEBUG
       DB_DRIVER: sqlite
-      DB_PATH: data/yt_blog_dev.db
+      DB_PATH: data/yt_platform_dev.db
     ports:
       - "8000:8000"
       - "5678:5678"
