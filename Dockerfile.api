@@ -1,67 +1,57 @@
-# syntax=docker/dockerfile:1.7
-# =============================================================================
-# YouTube Export Tool — production image (API + built SPA in one container)
-#
-#   docker build -f Dockerfile.api -t yt-export:local .
-#
-# Runs exactly ONE uvicorn worker: job progress, rate limits, login lockout and the
-# YouTube quota counter are held in process memory (see DEPLOYMENT.md). Scale up the
-# machine, not the worker count. TLS and client-IP forwarding are handled by the
-# reverse proxy in deploy/ (TRUSTED_PROXIES), never by uvicorn --proxy-headers.
-# =============================================================================
+FROM python:3.11-slim AS builder
 
-# ---- 1. Frontend build -------------------------------------------------------
-FROM node:24-bookworm-slim AS frontend
-WORKDIR /build
-COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci --no-audit --no-fund
-COPY frontend/ ./
-RUN npm run build \
-    && find dist -name '*.map' -delete
-
-# ---- 2. Python dependencies (hash-pinned) -----------------------------------
-FROM python:3.12-slim-bookworm AS pydeps
-ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
-RUN python -m venv /opt/venv
-COPY requirements.lock ./
-RUN /opt/venv/bin/pip install --require-hashes --no-deps -r requirements.lock \
-    && /opt/venv/bin/pip check
-
-# ---- 3. Runtime --------------------------------------------------------------
-FROM python:3.12-slim-bookworm AS runtime
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    curl \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd --system --gid 1000 appuser \
-    && useradd --system --uid 1000 --gid appuser --home-dir /app --shell /usr/sbin/nologin appuser
+WORKDIR /app
+
+COPY requirements.txt requirements-dev.txt ./
+RUN pip install --no-cache-dir -r requirements-dev.txt
+
+COPY . .
+RUN find . -type d \( -name "__pycache__" -o -name ".git" -o -name "node_modules" -o -name "tests" -o -name "venv" -o -name ".venv" -o -name "frontend" \) -prune -exec rm -rf {} + 2>/dev/null; \
+    find . -type f \( -name "*.pyc" -o -name "*.pyo" -o -name "*.egg-info" -o -name "*.egg" \) -delete
+
+FROM python:3.11-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    curl \
+    ca-certificates \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r appuser --gid 1000 && \
+    useradd -r -g appuser --uid 1000 -m -d /app appuser
+
+COPY --from=builder --chown=appuser:appuser /app /app
 
 WORKDIR /app
-COPY --from=pydeps /opt/venv /opt/venv
-COPY --chown=appuser:appuser . /app
-COPY --from=frontend --chown=appuser:appuser /build/dist /app/frontend/dist
-
-# Writable state; mounted as volumes in deploy/docker-compose.prod.yml.
-RUN mkdir -p webapp/runs data/transcripts data/transcript_jobs output logs tmp/audio \
-    && chown -R appuser:appuser webapp/runs data output logs tmp
-
-ENV PATH="/opt/venv/bin:$PATH" \
-    PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    APP_ENV=production \
-    WEB_CONCURRENCY=1 \
-    WHISPER_ENABLED=false \
-    LOG_LEVEL=INFO
 
 USER appuser
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    APP_ENV=production \
+    LOG_LEVEL=INFO
+
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-    CMD ["python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status == 200 else 1)"]
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8000/api/health || exit 1
 
-LABEL org.opencontainers.image.title="yt-export" \
-      org.opencontainers.image.description="YouTube Export & Transcript tool (FastAPI + React SPA)"
+LABEL maintainer="devops@youtube-export-platform.com" \
+      version="${IMAGE_TAG:-latest}" \
+      description="YouTube Export Platform - FastAPI Backend" \
+      org.opencontainers.image.title="yt-export-api" \
+      org.opencontainers.image.description="FastAPI backend for YouTube Export & Transcript platform" \
+      org.opencontainers.image.version="${IMAGE_TAG:-latest}" \
+      org.opencontainers.image.source="https://github.com/yourorg/youtube-export-platform" \
+      org.opencontainers.image.created=""
 
-CMD ["uvicorn", "webapp.main:app", "--host", "0.0.0.0", "--port", "8000", \
-     "--workers", "1", "--no-server-header", "--timeout-graceful-shutdown", "30"]
+CMD ["uvicorn", "webapp.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4", "--proxy-headers", "--forwarded-allow-ips=*"]
+
