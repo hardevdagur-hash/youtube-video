@@ -81,21 +81,6 @@ def _create_transcript_job(api_key: str, handle: str, **query) -> str:
     return resp.json()["data"]["job_id"]
 
 
-@pytest.fixture
-def export_jobs(auth_config, tmp_path, monkeypatch):
-    """Export jobs are created by the real route; only the pipeline run is stubbed."""
-    started: list = []
-
-    async def fake_pipeline(job_id, request):
-        started.append((job_id, request))
-
-    monkeypatch.setattr(web, "RUNS_DIR", tmp_path)
-    monkeypatch.setattr(web, "_run_async_pipeline", fake_pipeline)
-    monkeypatch.setattr(web, "is_youtube_api_key_valid", lambda: (True, ""))
-    web.rate_limiter.reset("export:testclient")
-    return started
-
-
 # ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------
@@ -191,24 +176,6 @@ def test_owner_is_recorded_from_authenticated_principal(transcript_jobs):
     assert persisted["owner"] == "key:user-key"
 
 
-def test_export_job_isolation_between_users(export_jobs):
-    a, b, admin = _client(USER_A), _client(USER_B), _client(TEST_ADMIN_KEY)
-    job_a = a.post("/api/export", json={"channel": "@channela", "limit": 5}).json()["job_id"]
-    job_b = b.post("/api/export", json={"channel": "@channelb", "limit": 5}).json()["job_id"]
-    (web.RUNS_DIR / job_b / "videos.csv").write_text("video_id\nabc\n", encoding="utf-8")
-    (web.RUNS_DIR / job_b / "progress.json").write_text('{"status": "completed"}', encoding="utf-8")
-
-    assert b.get(f"/api/export/{job_b}/progress").json()["success"] is True
-    assert a.get(f"/api/export/{job_b}/progress").json()["success"] is False
-    assert a.get(f"/api/export/{job_b}/download").status_code == 404
-    assert b.get(f"/api/export/{job_b}/download").status_code == 200
-    assert a.post(f"/api/export/{job_b}/cancel").json()["success"] is False
-    assert a.delete(f"/api/export/{job_b}").status_code == 404
-    assert (web.RUNS_DIR / job_b).exists()
-    assert admin.get(f"/api/export/{job_b}/progress").json()["success"] is True
-    assert (web.RUNS_DIR / job_a / "owner").read_text(encoding="utf-8") == "key:user-key"
-
-
 # ---------------------------------------------------------------------------
 # Input validation / unsafe filenames
 # ---------------------------------------------------------------------------
@@ -218,7 +185,7 @@ def test_export_job_isolation_between_users(export_jobs):
     "/api/transcript/jobs/..%2F..%2Fetc",
     "/api/transcript/jobs/%2e%2e%5c%2e%2e%5cwin.ini",
     "/api/transcript/jobs/0123456789ab%00",
-    "/api/export/..%5C..%5Cx/download",
+    "/api/transcript/jobs/..%5C..%5Cx/download",
 ])
 def test_path_traversal_rejected(authed_client, path):
     resp = authed_client.get(path)
@@ -228,8 +195,10 @@ def test_path_traversal_rejected(authed_client, path):
 
 
 def test_invalid_language_identifier_rejected(authed_client):
-    for bad in ("x", "e%3Cscript%3E", "english-language-long", "en%20us", "..%5C.."):
-        resp = authed_client.get(f"/api/transcript/dQw4w9WgXcQ/translate/{bad}")
+    for bad in ("x", "e<script>", "english-language-long", "en us", "..\\..", "fr"):
+        resp = authed_client.post("/api/transcript", json={"video_url": "dQw4w9WgXcQ", "output_language": bad})
+        assert resp.status_code == 400, bad
+        resp = authed_client.get("/api/channel/chan/transcripts", params={"output_language": bad})
         assert resp.status_code == 422, bad
 
 
@@ -269,13 +238,6 @@ def test_max_videos_per_job_boundary(transcript_jobs):
 def test_max_videos_zero_means_configured_cap(transcript_jobs):
     _create_transcript_job(USER_A, "channela", max_videos=0)
     assert transcript_jobs[-1]["max_videos"] == settings.max_videos_per_job
-
-
-def test_export_limit_zero_means_configured_cap(export_jobs):
-    resp = _client(USER_A).post("/api/export", json={"channel": "@chan", "limit": 0})
-    assert resp.status_code == 200
-    _, request = export_jobs[-1]
-    assert request.limit == settings.max_videos_per_job
 
 
 def test_max_videos_sync_export_boundary(authed_client):
@@ -338,9 +300,11 @@ def test_internal_error_generic_to_client_detailed_in_logs(auth_config, monkeypa
     def boom():
         raise RuntimeError(detail)
 
-    monkeypatch.setattr(web.quota_tracker, "usage", boom)
+    from services.transcript_limiter import transcript_limiter
+
+    monkeypatch.setattr(transcript_limiter, "get_status", boom)
     caplog.set_level(logging.ERROR, logger="webapp")
-    resp = _client(TEST_ADMIN_KEY).get("/api/quota")
+    resp = _client(TEST_ADMIN_KEY).get("/api/transcript/limiter/status")
 
     assert resp.status_code == 500
     body = resp.json()

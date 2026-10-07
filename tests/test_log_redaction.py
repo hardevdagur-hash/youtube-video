@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 import httpx
@@ -70,55 +69,34 @@ def _assert_no_fake_secret(text: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _youtube_client_with_mock_transport(seen: list[httpx.Request]):
-    from api.async_youtube_client import AsyncYouTubeClient
+def test_youtube_key_absent_from_googleapiclient_debug_logs(fake_secrets_env, caplog):
+    # googleapiclient logs the full request URL (including ?key=) at DEBUG level.
+    caplog.set_level(logging.DEBUG, logger="googleapiclient.discovery")
+    url = f"https://youtube.googleapis.com/youtube/v3/channels?part=id&forHandle=x&key={FAKE_YOUTUBE_KEY}&alt=json"
+    logging.getLogger("googleapiclient.discovery").debug("URL being requested: GET %s", url)
+    assert "key=" + REDACTED in caplog.text
+    _assert_no_fake_secret(caplog.text)
+
+
+def test_httpx_debug_logging_redacts_credentials(fake_secrets_env, caplog):
+    # Worst case for the Groq SDK (httpx based): someone turns httpx logging up to DEBUG.
+    caplog.set_level(logging.DEBUG, logger="httpx")
+    caplog.set_level(logging.DEBUG, logger="httpcore")
+    seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        return httpx.Response(200, json={"items": [{"id": "UC123"}]})
+        return httpx.Response(200, json={"ok": True})
 
-    client = AsyncYouTubeClient(api_key=FAKE_YOUTUBE_KEY)
-    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    return client
-
-
-def test_youtube_request_still_sends_configured_key(fake_secrets_env):
-    seen: list[httpx.Request] = []
-    client = _youtube_client_with_mock_transport(seen)
-
-    async def run():
-        try:
-            return await client._request("channels", {"part": "id", "forHandle": "somechannel"})
-        finally:
-            await client.close()
-
-    data = asyncio.run(run())
-    assert data == {"items": [{"id": "UC123"}]}
-    assert len(seen) == 1
-    assert seen[0].url.params["key"] == FAKE_YOUTUBE_KEY  # Google still receives the key
-    assert seen[0].url.params["forHandle"] == "somechannel"
-
-
-def test_youtube_key_absent_from_logs_even_with_http_debug_logging(fake_secrets_env, caplog):
-    # Worst case: someone turns httpx/httpcore logging up to DEBUG.
-    caplog.set_level(logging.DEBUG, logger="httpx")
-    caplog.set_level(logging.DEBUG, logger="httpcore")
-    caplog.set_level(logging.DEBUG, logger="api.async_youtube_client")
-    seen: list[httpx.Request] = []
-    client = _youtube_client_with_mock_transport(seen)
-
-    async def run():
-        try:
-            await client._request("channels", {"part": "id", "forHandle": "somechannel"})
-        finally:
-            await client.close()
-
-    asyncio.run(run())
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        resp = client.get("https://api.example.com/v1/x", params={"key": FAKE_YOUTUBE_KEY},
+                          headers={"Authorization": f"Bearer {FAKE_GROQ_KEY}"})
+    assert resp.status_code == 200
+    assert seen[0].url.params["key"] == FAKE_YOUTUBE_KEY  # the upstream still receives the credential
     httpx_records = [r for r in caplog.records if r.name == "httpx"]
     assert httpx_records, "httpx should have logged the request at DEBUG level"
     assert "key=" + REDACTED in httpx_records[0].getMessage()
     _assert_no_fake_secret(caplog.text)
-
 
 def test_http_client_request_logging_suppressed_by_default(fake_secrets_env, isolated_logging, tmp_path, monkeypatch):
     from config.settings import settings
@@ -235,20 +213,6 @@ def test_stdout_and_file_output_redacted(fake_secrets_env, isolated_logging, tmp
     assert "Requesting https://www.googleapis.com/youtube/v3/channels" in stdout
     assert "Requesting https://www.googleapis.com/youtube/v3/channels" in file_text
     assert "request_url" in file_text  # structured extras kept, only the secret removed
-
-
-def test_cli_logging_setup_also_redacts(fake_secrets_env, isolated_logging, tmp_path, monkeypatch, capsys):
-    from config.settings import settings
-    from utils.logging_config import setup_logging as cli_setup_logging
-
-    monkeypatch.setattr(settings, "logs_dir", tmp_path)
-    cli_setup_logging()
-    logging.getLogger("tests.cli").warning("calling ?key=%s", FAKE_YOUTUBE_KEY)
-    for h in logging.getLogger().handlers:
-        h.flush()
-    _assert_no_fake_secret(capsys.readouterr().out)
-    _assert_no_fake_secret((tmp_path / "app.log").read_text(encoding="utf-8"))
-    assert not logging.getLogger("httpx").isEnabledFor(logging.INFO)
 
 
 # ---------------------------------------------------------------------------

@@ -260,7 +260,7 @@ def job_env(monkeypatch, tmp_path):
     import services.translation.service as translation_module
     from config.settings import settings
     from services.jobs.transcript_job_manager import TranscriptJobManager
-    from transcript_reliability.transcript_limiter import transcript_limiter
+    from services.transcript_limiter import transcript_limiter
 
     stt = StubSTT()
     translator = StubTranslator()
@@ -393,7 +393,7 @@ def test_csv_export_rejects_unknown_output_language(route_env):
 
 @pytest.mark.parametrize(("mode", "expected"), [("original", HINDI_SPEECH), ("en", SIMPLE_ENGLISH)])
 def test_sync_channel_transcripts_honour_output_language(route_env, monkeypatch, mode, expected):
-    from transcript_reliability.transcript_limiter import transcript_limiter
+    from services.transcript_limiter import transcript_limiter
 
     async def no_wait(video_id):
         return None

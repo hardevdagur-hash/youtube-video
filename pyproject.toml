@@ -3,26 +3,13 @@ requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "youtube-export-platform"
+name = "youtube-transcript-service"
 version = "1.0.0"
-description = "Enterprise YouTube Channel Metadata & Video Transcript Platform with background processing, observability, and comprehensive testing"
+description = "Single-instance YouTube transcript service: single videos, channel jobs, translation and CSV export"
 requires-python = ">=3.11"
 authors = [
     {name = "Rishi", email = "rishi@example.com"},
 ]
-
-[tool.black]
-line-length = 100
-target-version = ["py311"]
-include = '\.py$'
-
-[tool.isort]
-profile = "black"
-line_length = 100
-multi_line_output = 3
-include_trailing_comma = true
-force_grid_wrap = 0
-use_parentheses = true
 
 [tool.ruff]
 target-version = "py311"
@@ -38,60 +25,7 @@ ignore = ["E501"]
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "S311"]
 
-[tool.mypy]
-python_version = "3.11"
-ignore_missing_imports = true
-disallow_untyped_defs = false
-warn_unused_ignores = true
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests", "background_processing/tests"]
-markers = [
-    "performance: Performance tests (slow, measure latency/throughput)",
-    "security: Security tests (auth, injection, OWASP)",
-    "chaos: Chaos engineering tests (fault injection, recovery)",
-    "load: Load tests (concurrent users, throughput)",
-    "stress: Stress tests (system beyond capacity)",
-    "e2e: End-to-end tests (full user journey)",
-    "regression: Regression tests (compare against baselines)",
-    "ai_regression: AI regression tests (prompt/output quality)",
-    "benchmark: Benchmark tests (timed execution)",
-    "integration: Integration tests (module interaction)",
-    "unit: Unit tests (isolated module testing)",
-    "slow: Slow tests (excluded from quick runs)",
-    "flaky: Flaky tests (known intermittent failures)",
-    "db: Database tests (transactions, migrations, concurrency)",
-    "cache: Cache tests (hit/miss, TTL, eviction)",
-    "export: Export format tests (markdown, html, pdf...)",
-    "prompt: Prompt management tests (rendering, variables)",
-    "background_job: Background job tests (queue, retry, DLQ)",
-    "accessibility: Accessibility tests (WCAG, keyboard, screen reader)",
-    "smoke: Smoke tests (quick sanity checks)",
-]
-addopts = "--strict-markers --tb=short"
-
 [tool.coverage.run]
 source = ["."]
-omit = ["tests/*", "venv/*", "**/migrations/*"]
+omit = ["tests/*", ".venv/*", "venv/*"]
 branch = true
-
-[tool.coverage.report]
-exclude_lines = [
-    "pragma: no cover",
-    "def __repr__",
-    "raise NotImplementedError",
-    'if __name__ == .__main__.:',
-    "pass",
-    "raise NotImplementedError",
-]
-fail_under = 95
-
-[tool.bandit]
-exclude = ["tests", "venv"]
-skips = ["B101"]
-
-[tool.interrogate]
-fail-under = 80
-ignore-init-method = true
-ignore-module = true

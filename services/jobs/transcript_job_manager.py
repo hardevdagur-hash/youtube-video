@@ -21,7 +21,7 @@ from typing import Any
 from config.settings import settings
 from models.transcript_job import JobStatus, TranscriptJobProgress, TranscriptVideoItem
 from services.duration_filter import evaluate_duration, parse_iso_duration
-from transcript_reliability.transcript_limiter import transcript_limiter
+from services.transcript_limiter import transcript_limiter
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +110,41 @@ class TranscriptJobManager:
             temp.replace(target)
         except Exception as exc:
             logger.warning("Failed to save transcript job checkpoint for %s: %s", job.job_id, exc)
+
+    def storage_writable(self) -> bool:
+        """Cheap readiness probe: the checkpoint directory exists and is writable."""
+        try:
+            probe = self._jobs_dir / ".healthcheck"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+            return True
+        except OSError as exc:
+            logger.error("Transcript job storage %s is not writable: %s", self._jobs_dir, exc)
+            return False
+
+    def active_job_count(self) -> int:
+        return sum(1 for task in self._tasks.values() if not task.done())
+
+    async def shutdown(self) -> None:
+        """Stop running jobs on server shutdown, checkpointing them as PAUSED so they can be resumed."""
+        running = {jid: t for jid, t in self._tasks.items() if not t.done()}
+        for job_id, task in running.items():
+            job = self._jobs.get(job_id)
+            if job and job.status not in (JobStatus.COMPLETED, JobStatus.CANCELLED, JobStatus.FAILED):
+                job.status = JobStatus.PAUSED
+                job.error = "Interrupted by server shutdown. Resume to continue."
+            task.cancel()
+        if running:
+            await asyncio.gather(*running.values(), return_exceptions=True)
+        for job_id in running:
+            job = self._jobs.get(job_id)
+            if job and job.status == JobStatus.CANCELLED and job.error == "Interrupted by server shutdown. Resume to continue.":
+                job.status = JobStatus.PAUSED
+            if job:
+                self._save_checkpoint(job)
+        self._tasks.clear()
+        if running:
+            logger.info("Paused %d running transcript job(s) for shutdown", len(running))
 
     def get_job(self, job_id: str) -> TranscriptJobProgress | None:
         job = self._jobs.get(job_id)

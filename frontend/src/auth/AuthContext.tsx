@@ -162,7 +162,7 @@ export function LoginForm() {
         aria-label="Sign in"
       >
         <h1 className="text-xl font-bold text-gray-900 dark:text-white">Sign in</h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">Sign in to use the export tools.</p>
+        <p className="text-sm text-gray-500 dark:text-gray-400">Sign in to fetch and export transcripts.</p>
         <div>
           <label htmlFor="login-username" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
             Username

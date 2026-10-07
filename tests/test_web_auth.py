@@ -65,7 +65,7 @@ def test_every_api_route_requires_authentication(auth_config):
         assert resp.status_code == 401, f"{method} {template} returned {resp.status_code} without credentials"
         assert resp.json()["error_code"] == "UNAUTHENTICATED"
         checked += 1
-    assert checked >= 30  # guards against the route enumeration silently matching nothing
+    assert checked >= 10  # guards against the route enumeration silently matching nothing
 
 
 def test_invalid_api_key_rejected(auth_config):
@@ -88,7 +88,7 @@ def test_anonymous_health_reveals_only_status(auth_config):
 def test_authenticated_health_has_details(auth_config, monkeypatch):
     resp = _client(TEST_USER_KEY).get("/api/health")
     assert resp.status_code == 200
-    assert "storage" in resp.json()["data"]
+    assert resp.json()["data"]["job_storage_writable"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -222,7 +222,7 @@ def test_cors_wildcard_never_allows_credentials():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("path", ["/api/quota", "/api/metrics", "/api/cache/stats", "/api/export/jobs/active"])
+@pytest.mark.parametrize("path", ["/api/transcript/metrics", "/api/transcript/limiter/status"])
 def test_admin_only_routes(auth_config, path):
     assert is_admin_path(path)
     assert _client(TEST_USER_KEY).get(path).status_code == 403
@@ -269,25 +269,6 @@ def test_legacy_transcript_job_without_owner_is_admin_only(auth_config):
         transcript_job_manager._jobs.pop(job.job_id, None)
 
 
-def test_export_job_ownership(auth_config, tmp_path, monkeypatch):
-    monkeypatch.setattr(web, "RUNS_DIR", tmp_path)
-    job_id = "0a1b2c3d4e5f"
-    run_dir = tmp_path / job_id
-    run_dir.mkdir()
-    (run_dir / "owner").write_text("key:user-key", encoding="utf-8")
-    (run_dir / "progress.json").write_text('{"status": "completed"}', encoding="utf-8")
-
-    owner_resp = _client(TEST_USER_KEY).get(f"/api/export/{job_id}/progress")
-    assert owner_resp.json()["success"] is True
-
-    other = _client(TEST_OTHER_USER_KEY)
-    assert other.get(f"/api/export/{job_id}/progress").json()["success"] is False
-    assert other.delete(f"/api/export/{job_id}").status_code == 404
-    assert run_dir.exists()  # another user cannot delete it
-
-    assert _client(TEST_ADMIN_KEY).get(f"/api/export/{job_id}/progress").json()["success"] is True
-
-
 # ---------------------------------------------------------------------------
 # Rate limiting
 # ---------------------------------------------------------------------------
@@ -319,10 +300,8 @@ def test_rate_limit_returns_429_with_retry_after(monkeypatch):
     "/api/transcript/jobs/..%5C..%5Csecrets",
     "/api/transcript/jobs/not-a-job",
     "/api/transcript/jobs/0123456789AB",
-    "/api/transcript/bad!id",
-    "/api/transcript/dQw4w9WgXcQ/translate/e%3Cx%3E",
-    "/api/video-metadata/short",
-    "/api/transcriptv2/..%5C..%5Cwindows",
+    "/api/channel/bad%20handle/transcripts",
+    "/api/channel/..%5C..%5Cwindows/transcripts",
 ])
 def test_malformed_identifiers_rejected(authed_client, path):
     assert authed_client.get(path).status_code == 422
@@ -354,12 +333,6 @@ def test_sync_export_max_videos_bounded(authed_client):
     assert resp.status_code == 422
 
 
-@pytest.mark.parametrize("limit", [-5, 10_000_000, "abc"])
-def test_export_limit_bounded(authed_client, limit):
-    resp = authed_client.post("/api/export", json={"channel": "@chan", "limit": limit})
-    assert resp.status_code == 422
-
-
 def test_filename_sanitised():
     assert web._safe_filename_part('evil"; filename=x.exe\r\n') == "evil___filename_x.exe__"
 
@@ -373,8 +346,10 @@ def test_unhandled_errors_do_not_leak_details(auth_config, monkeypatch):
     def boom():
         raise RuntimeError("db password=hunter2 at C:\\internal\\path")
 
-    monkeypatch.setattr(web.quota_tracker, "usage", boom)
-    resp = _client(TEST_ADMIN_KEY).get("/api/quota")
+    from services.transcript_limiter import transcript_limiter
+
+    monkeypatch.setattr(transcript_limiter, "get_status", boom)
+    resp = _client(TEST_ADMIN_KEY).get("/api/transcript/limiter/status")
     assert resp.status_code == 500
     body = resp.text
     assert "hunter2" not in body

@@ -23,19 +23,6 @@ class TestCacheUtilities:
         assert cache.get("missing") is None
 
 
-class TestLoggingConfig:
-    def test_get_logger(self):
-        from observability.logger import get_logger
-        logger = get_logger("test_logger")
-        assert logger is not None
-
-    def test_configure(self):
-        from observability.logger import configure_logging
-        from observability.config import ObservabilityConfig
-        configure_logging(ObservabilityConfig())
-        assert True
-
-
 class TestHTTPClient:
     def test_get(self):
         pass
@@ -72,20 +59,6 @@ class TestRetryLogic:
         assert call_count[0] == 3
 
 
-class TestTokenCounter:
-    def test_count_tokens(self):
-        from utils.token_counter import estimate_tokens
-        count = estimate_tokens("Python is a programming language")
-        assert count > 0
-
-    def test_count_tokens_empty(self):
-        from utils.token_counter import estimate_tokens
-        assert estimate_tokens("") == 1
-
-    def test_truncate_to_tokens(self):
-        pass
-
-
 class TestTextCleaner:
 
     def test_clean_text(self):
@@ -108,80 +81,6 @@ class TestTextUtilities:
 
     def test_extract_keywords(self):
         pass
-
-
-class TestConfidenceScoring:
-    def test_compute_confidence(self):
-        from utils.confidence import compute_confidence
-        score = compute_confidence(word_count=800, sentence_count=40, has_entities=True, has_keywords=True, has_outline=True)
-        assert 0 <= score <= 1
-        assert score > 0.8
-
-    def test_confidence_weighted(self):
-        pass
-
-
-class TestDateFormatter:
-    def test_format_date(self):
-        from utils.date_formatter import format_date
-        result = format_date("2024-01-15T10:30:00Z")
-        assert isinstance(result, dict)
-        assert "relative" in result
-        assert result["relative"] is not None
-
-    def test_relative_time(self):
-        from utils.date_formatter import format_date
-        result = format_date("2024-01-01T00:00:00Z")
-        assert isinstance(result, dict)
-        assert "relative" in result
-
-
-class TestNumberFormatter:
-    def test_format_number(self):
-        from utils.number_formatter import format_count
-        assert format_count(1000) == "1.0K"
-        assert format_count(1000000) == "1.0M"
-
-    def test_format_percentage(self):
-        pass
-
-
-class TestDurationParser:
-    def test_parse_duration(self):
-        from utils.duration import parse_duration_to_seconds
-        assert parse_duration_to_seconds("PT1H30M15S") == 5415
-        assert parse_duration_to_seconds("PT10M") == 600
-        assert parse_duration_to_seconds("PT30S") == 30
-
-    def test_format_duration(self):
-        from utils.duration import format_duration
-        assert format_duration(90) == "1:30"
-        assert format_duration(3600) == "1:00:00"
-
-
-class TestThumbnailExtraction:
-    def test_get_thumbnail_url(self):
-        from utils.thumbnail import best_thumbnail
-        thumbnails = {
-            "default": "https://example.com/default.jpg",
-            "medium": "https://example.com/medium.jpg",
-            "high": "https://example.com/high.jpg",
-            "standard": None,
-            "maxres": None,
-        }
-        url = best_thumbnail(thumbnails)
-        assert url is not None
-        assert "example.com" in url
-
-    def test_get_all_thumbnails(self):
-        from utils.thumbnail import extract_thumbnails
-        thumbnails_data = {
-            "default": {"url": "https://example.com/default.jpg"},
-            "medium": {"url": "https://example.com/medium.jpg"},
-            "high": {"url": "https://example.com/high.jpg"},
-        }
-        thumbnails = extract_thumbnails(thumbnails_data)
-        assert len(thumbnails) > 0
 
 
 class TestReadTimeEstimation:

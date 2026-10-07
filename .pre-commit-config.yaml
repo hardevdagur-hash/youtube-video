@@ -1,44 +1,17 @@
+# Checks only: no hook rewrites source files. Fix lint findings explicitly
+# with `ruff check <paths> --fix` after reviewing them.
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.5.0
     hooks:
-      - id: trailing-whitespace
-      - id: end-of-file-fixer
       - id: check-yaml
-      - id: check-added-large-files
       - id: check-json
       - id: check-toml
+      - id: check-added-large-files
       - id: detect-private-key
       - id: check-merge-conflict
-  - repo: https://github.com/psf/black
-    rev: 24.1.1
-    hooks:
-      - id: black
-        args: [--line-length=100, --target-version=py311]
-  - repo: https://github.com/pycqa/isort
-    rev: 5.13.2
-    hooks:
-      - id: isort
-        args: [--profile=black, --line-length=100]
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.3.0
+    rev: v0.6.9
     hooks:
       - id: ruff
-        args: [--fix, --line-length=100]
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.8.0
-    hooks:
-      - id: mypy
-        additional_dependencies: [types-all]
-        args: [--ignore-missing-imports]
-  - repo: https://github.com/PyCQA/bandit
-    rev: 1.7.7
-    hooks:
-      - id: bandit
-        args: [--skip=B101, --exclude=tests,venv]
-  - repo: https://github.com/econchick/interrogate
-    rev: 1.5.0
-    hooks:
-      - id: interrogate
-        args: [--fail-under=80, --ignore-init-method, --ignore-module]
-        pass_filenames: false
+        args: [--no-fix]

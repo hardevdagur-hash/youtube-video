@@ -25,7 +25,7 @@ from services.transcription.validator import (
 from services.transcription.service import TranscriptService
 from services.translation.service import TranslationService
 from repositories.transcript_repository import TranscriptRepository
-from observability.transcript_metrics import TranscriptMetricsTracker
+from services.transcript_metrics import TranscriptMetricsTracker
 
 
 # ---------------------------------------------------------------------------

@@ -19,39 +19,6 @@ def client(authed_client):
 class TestTranscriptEndpoints:
     """Test suite for transcript endpoints in webapp/main.py."""
 
-    def test_transcript_v2_endpoint_returns_rich_metadata(self, client):
-        """GET /api/transcriptv2/{video_id} returns title, duration, transcript plus status, source, method."""
-        with patch("webapp.main._get_video_service") as mock_vsvc, \
-             patch("webapp.main._get_transcript_service") as mock_tsvc:
-
-            mock_vsvc.return_value.get_videos_batch.return_value = [
-                {
-                    "id": "test_vid_12",
-                    "snippet": {"title": "Sample Test Video"},
-                    "contentDetails": {"duration": "PT11M48S"},
-                }
-            ]
-
-            mock_res = MagicMock()
-            mock_res.success = True
-            mock_res.plain_text = "This is a sample caption transcript text."
-            mock_res.paragraph_text = ""
-            mock_res.source.value = "manual"
-            mock_res.method = "caption"
-            mock_res.language = "en"
-            mock_tsvc.return_value.get_transcript.return_value = mock_res
-
-            resp = client.get("/api/transcriptv2/test_vid_12")
-            assert resp.status_code == 200
-            data = resp.json()
-
-            assert data["video_id"] == "test_vid_12"
-            assert data["title"] == "Sample Test Video"
-            assert data["duration"] == "11:48"
-            assert data["status"] == "success"
-            assert data["method"] == "caption"
-            assert "sample caption transcript" in data["transcript"]
-
     def test_transcript_job_status_and_download_endpoints(self, client):
         """GET /api/transcript/jobs/{job_id} and download endpoints work with 15-column CSV."""
         job = TranscriptJobProgress(

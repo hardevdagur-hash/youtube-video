@@ -1,35 +1,26 @@
 """
-YouTube CSV Export â€” FastAPI Application (v3)
+YouTube Transcript Service — FastAPI application.
 
-Architecture
-============
-- Exports run as background threads managed by JobManager.
-- POST /api/export returns immediately with a job_id.
-- Frontend polls GET /api/export/{job_id}/progress for real-time updates.
-- Supports cancellation via POST /api/export/{job_id}/cancel.
-- Redis/in-memory caching for channel lookups and playlist IDs.
-- Streaming CSV writer with constant memory usage.
-- Structured JSON logging with correlation IDs.
-- Metrics collection for monitoring.
+Single-instance, single-worker service. Background channel jobs run as asyncio
+tasks owned by ``TranscriptJobManager`` and are checkpointed to disk so they
+survive restarts.
 
 Endpoints
 =========
-GET    /api/health                          Health check
-POST   /api/export                          Start export (returns job_id)
-GET    /api/export/{job_id}/progress        Poll export progress
-GET    /api/export/{job_id}/result          Get export result
-GET    /api/export/{job_id}/download        Download CSV
-POST   /api/export/{job_id}/cancel          Cancel export
-DELETE /api/export/{job_id}                 Delete export and cleanup
-GET    /api/export/jobs/active              List active jobs
-GET    /api/export/jobs/history             List completed jobs
-GET    /api/metrics                         System metrics
-GET    /api/cache/stats                     Cache statistics
-GET    /api/quota                           YouTube API quota status
-GET    /api/validate-url                    Validate YouTube URL
-GET    /api/video-metadata/{video_id}       Get single video metadata
-GET    /api/transcript/{video_id}           Get transcript
-(plus all existing transcript and metadata export endpoints)
+GET    /api/health                                Liveness/readiness (public)
+POST   /api/auth/login | /api/auth/logout         Session cookie auth (public)
+GET    /api/auth/me                               Current principal
+POST   /api/transcript                            Single video transcript (+ translation)
+GET    /api/channel/{handle}/transcripts          Synchronous channel transcripts (bounded)
+POST   /api/channel/{handle}/transcript-job       Start background channel job
+GET    /api/transcript/jobs/{job_id}              Job status / progress / results
+POST   /api/transcript/jobs/{job_id}/cancel       Cancel job
+POST   /api/transcript/jobs/{job_id}/resume       Resume job
+GET    /api/transcript/jobs/{job_id}/download     Job CSV export
+POST   /api/transcript/export                     Synchronous CSV export (video or channel)
+GET    /api/validate-url                          Parse/validate a YouTube URL
+GET    /api/transcript/metrics                    Transcript counters (admin)
+GET    /api/transcript/limiter/status             Rate limiter state (admin)
 """
 
 from __future__ import annotations
@@ -40,14 +31,12 @@ import io
 import json
 import logging
 import re
-import shutil
 import time
 import uuid
 from contextlib import asynccontextmanager
-from functools import partial
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi import FastAPI, Query, Request
 from fastapi import Path as PathParam
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
@@ -55,18 +44,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config.settings import is_youtube_api_key_valid, settings
-from export_engine.models import ExportRequest
-from export_engine.async_pipeline import AsyncExportPipeline
 from infrastructure.logging import setup_logging
-from infrastructure.monitoring import metrics
-from infrastructure.rate_limiter import quota_tracker, rate_limiter
 from infrastructure.validation import RequestValidationMiddleware
 from models.api_response import error_response, success_response
-from services.english_converter import english_converter
-
-from observability.config import ObservabilityConfig
-from observability.instrumentation import instrument_fastapi
-from observability.telemetry import TelemetryOrchestrator
 from security.web_auth import (
     SESSION_COOKIE,
     AuthMiddleware,
@@ -81,47 +61,16 @@ from services.english_converter import english_converter
 setup_logging()
 
 CURRENT_DIR = Path(__file__).resolve().parent
-RUNS_DIR = CURRENT_DIR / "runs"
-TEMPLATES_DIR = CURRENT_DIR / "templates"
-STATIC_DIR = CURRENT_DIR / "static"
 FRONTEND_DIST = CURRENT_DIR.parent / "frontend" / "dist"
 
 logger = logging.getLogger("webapp")
 
-_RUN_ID_PATTERN = re.compile(r"^[0-9a-f]{12}$")
 
-_export_path = Path(__file__).resolve().parent.parent
-import sys as _sys
-if str(_export_path) not in _sys.path:
-    _sys.path.insert(0, str(_export_path))
-
-
-def _safe_run_id(raw: str) -> str | None:
-    if _RUN_ID_PATTERN.match(raw):
-        return raw
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Global services
-# ---------------------------------------------------------------------------
-
-_async_pipeline = AsyncExportPipeline()
-_running_tasks: dict[str, asyncio.Task] = {}
-_running_tasks_lock = asyncio.Lock()
-
-
-async def _run_async_pipeline(job_id: str, request: ExportRequest) -> None:
-    try:
-        await _async_pipeline.run(job_id, request)
-    except asyncio.CancelledError:
-        logger.info("Job %s was cancelled", job_id)
-        await _async_pipeline.cancel_job(job_id)
-    except Exception:
-        logger.exception("Job %s failed with unexpected error", job_id)
-    finally:
-        async with _running_tasks_lock:
-            _running_tasks.pop(job_id, None)
+def _to_thread(func, *args, **kwargs):
+    """Run a sync function in a thread pool to avoid blocking the event loop."""
+    import functools
+    loop = asyncio.get_running_loop()
+    return loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
 
 
 # ---------------------------------------------------------------------------
@@ -129,44 +78,13 @@ async def _run_async_pipeline(job_id: str, request: ExportRequest) -> None:
 # ---------------------------------------------------------------------------
 
 
-
-def _to_thread(func, *args, **kwargs):
-    """Run a sync function in a thread pool to avoid blocking the event loop."""
-    import asyncio
-    loop = asyncio.get_running_loop()
-    import functools
-    return loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
-
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Async webapp v3 starting")
-    logger.info("Open http://localhost:8000 in your browser")
-
-    # Initialize observability (structured logging, tracing, metrics, Sentry)
-    _telemetry.initialize()
-
-    # Clean stale run dirs
-    if RUNS_DIR.exists():
-        stale_cutoff = time.time() - 3600
-        for entry in RUNS_DIR.iterdir():
-            if entry.is_dir() and _RUN_ID_PATTERN.match(entry.name):
-                result_file = entry / "result.json"
-                if not result_file.exists() and entry.stat().st_mtime < stale_cutoff:
-                    shutil.rmtree(str(entry), ignore_errors=True)
-
+    logger.info("Transcript service starting (env=%s)", _auth_settings.app_env)
     yield
-
-    # Cleanup running tasks on shutdown
-    async with _running_tasks_lock:
-        for task in _running_tasks.values():
-            task.cancel()
-        _running_tasks.clear()
-    await _async_pipeline.close()
-
-    # Shutdown observability
-    _telemetry.shutdown()
+    from services.jobs.transcript_job_manager import transcript_job_manager
+    await transcript_job_manager.shutdown()
+    logger.info("Transcript service stopped")
 
 
 # Security configuration: fails fast in production when credentials/secrets are unsafe
@@ -175,7 +93,7 @@ _auth_settings.validate()
 _authenticator = WebAuthenticator(_auth_settings)
 
 app = FastAPI(
-    title="YouTube Export Tool v3 (Async)",
+    title="YouTube Transcript Service",
     lifespan=lifespan,
     # API schema/explorer are not exposed in production
     openapi_url=None if _auth_settings.is_production else "/openapi.json",
@@ -183,22 +101,17 @@ app = FastAPI(
     redoc_url=None if _auth_settings.is_production else "/redoc",
 )
 
-# Observability: create orchestrator at module level; initialize() called in lifespan
-_telemetry = TelemetryOrchestrator(ObservabilityConfig.from_env())
-
 # Middleware (last added = outermost):
-#   instrumentation -> CORS -> request validation -> auth/authz/rate limit -> routes
+#   CORS -> request validation -> auth/authz/rate limit -> routes
 app.add_middleware(AuthMiddleware, authenticator=_authenticator)
 app.add_middleware(RequestValidationMiddleware)
 app.add_middleware(CORSMiddleware, **cors_options(_auth_settings))  # '*' is refused in production
 
-# Instrument FastAPI last (outermost wrapping â€” captures all requests)
-instrument_fastapi(app, _telemetry.metrics, _telemetry.tracing)
-
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-_frontend_assets = FRONTEND_DIST / "assets"
-_frontend_assets.mkdir(parents=True, exist_ok=True)
-app.mount("/assets", StaticFiles(directory=str(_frontend_assets)), name="frontend-assets")
+# Built SPA assets (frontend/dist). Mounted only when present so the API can run without a build.
+for _mount, _sub in (("/assets", "assets"), ("/static", "static")):
+    _dir = FRONTEND_DIST / _sub
+    if _dir.is_dir():
+        app.mount(_mount, StaticFiles(directory=str(_dir)), name=f"frontend-{_sub}")
 
 
 @app.middleware("http")
@@ -249,33 +162,12 @@ def _principal(request: Request) -> Principal | None:
     return getattr(request.state, "principal", None)
 
 
-def _not_found(rid: str | None = None) -> JSONResponse:
-    return JSONResponse(status_code=404, content={"success": False, "error": "Job not found", "trace_id": rid})
-
-
-_EXPORT_OWNER_FILE = "owner"
-
-
-def _can_access_export(request: Request, job_id: str) -> bool:
-    """Export jobs record their creator in runs/<job_id>/owner; legacy jobs are admin-only."""
-    owner_path = RUNS_DIR / job_id / _EXPORT_OWNER_FILE
-    try:
-        owner = owner_path.read_text(encoding="utf-8").strip() or None
-    except OSError:
-        owner = None
-    return can_access_owned(_principal(request), owner)
-
-
 def _can_access_transcript_job(request: Request, job) -> bool:
     return can_access_owned(_principal(request), getattr(job, "owner", None))
 
 
-_HANDLE_RE = re.compile(r"^@?[A-Za-z0-9._-]{1,100}$")
-_LANG_RE = re.compile(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})?$")
-_VIDEO_ID_PATTERN = r"^[A-Za-z0-9_-]{11}$"
 _JOB_ID_PATTERN = r"^[0-9a-f]{12}$"
 _HANDLE_PATTERN = r"^@?[A-Za-z0-9._-]{1,100}$"
-_MAX_SEGMENTS = 20000
 _MAX_CONCURRENCY = 10
 
 
@@ -339,273 +231,47 @@ def _spa_index() -> FileResponse | HTMLResponse:
 
 
 @app.get("/")
-@app.get("/metadata")
 @app.get("/transcript")
-@app.get("/docs")
-async def spa_routes(path: str = ""):
+async def spa_routes():
     return _spa_index()
 
 
 # ---------------------------------------------------------------------------
-# Export API (Async)
-# ---------------------------------------------------------------------------
-
-
-@app.post("/api/export")
-async def api_export(request: Request) -> dict:
-    rid = uuid.uuid4().hex[:8]
-    body = await request.json()
-
-    if not isinstance(body, dict):
-        return JSONResponse(status_code=422, content={"success": False, "error": "Request body must be a JSON object.", "trace_id": rid})
-    raw_channel = body.get("channel", "")
-    channel_input = raw_channel.strip() if isinstance(raw_channel, str) else ""
-    try:
-        limit = int(body.get("limit", 0) or 0)
-    except (TypeError, ValueError):
-        return JSONResponse(status_code=422, content={"success": False, "error": "limit must be an integer.", "trace_id": rid})
-    if limit < 0 or limit > settings.max_videos_per_job:
-        return JSONResponse(status_code=422, content={"success": False, "error": f"limit must be between 0 and {settings.max_videos_per_job}.", "trace_id": rid})
-    if limit == 0:
-        limit = settings.max_videos_per_job
-
-    if not channel_input or len(channel_input) > 500:
-        return JSONResponse(status_code=400, content={"success": False, "error": "Channel identifier cannot be empty.", "trace_id": rid})
-
-    client_host = _authenticator.client_ip(request)
-    if not rate_limiter.allow(f"export:{client_host}"):
-        return JSONResponse(status_code=429, content={"success": False, "error": "Too many requests.", "trace_id": rid})
-
-    key_ok, key_error = is_youtube_api_key_valid()
-    if not key_ok:
-        return JSONResponse(status_code=503, content={"success": False, "error": key_error, "trace_id": rid})
-
-    if not quota_tracker.record_call(1):
-        return JSONResponse(status_code=429, content={"success": False, "error": "Daily API quota reached.", "trace_id": rid})
-
-    job_id = uuid.uuid4().hex[:12]
-    export_req = ExportRequest(channel_input=channel_input, limit=limit)
-
-    # Start async background task
-    run_dir = RUNS_DIR / job_id
-    run_dir.mkdir(parents=True, exist_ok=True)
-    principal = _principal(request)
-    (run_dir / _EXPORT_OWNER_FILE).write_text(principal.subject if principal else "", encoding="utf-8")
-
-    task = asyncio.create_task(_run_async_pipeline(job_id, export_req))
-    async with _running_tasks_lock:
-        _running_tasks[job_id] = task
-
-    logger.info("[%s] Async export started: channel=%s, limit=%d, job_id=%s", rid, channel_input, limit, job_id)
-
-    return {"success": True, "job_id": job_id, "trace_id": rid, "status": "pending"}
-
-
-@app.get("/api/export/{job_id}/progress")
-async def api_export_progress(job_id: str, request: Request) -> dict:
-    rid = uuid.uuid4().hex[:8]
-    if not _safe_run_id(job_id):
-        return {"success": False, "error": "Invalid job ID", "trace_id": rid}
-    if not _can_access_export(request, job_id):
-        return {"success": False, "error": "Job not found", "trace_id": rid}
-
-    progress = await _async_pipeline.get_progress(job_id)
-    if progress is None:
-        # Fall back to disk
-        progress_path = RUNS_DIR / job_id / "progress.json"
-        if progress_path.exists():
-            try:
-                progress = json.loads(progress_path.read_text())
-            except Exception:
-                pass
-    if progress is None:
-        return {"success": False, "error": "Job not found", "trace_id": rid}
-
-    return {"success": True, "job_id": job_id, "trace_id": rid, **progress}
-
-
-@app.get("/api/export/{job_id}/result")
-async def api_export_result(job_id: str, request: Request) -> dict:
-    rid = uuid.uuid4().hex[:8]
-    if not _safe_run_id(job_id):
-        return {"success": False, "error": "Invalid job ID", "trace_id": rid}
-    if not _can_access_export(request, job_id):
-        return {"success": False, "error": "Export not ready", "trace_id": rid}
-
-    result = await _async_pipeline.get_result(job_id)
-    if result is None:
-        result_path = RUNS_DIR / job_id / "result.json"
-        if result_path.exists():
-            try:
-                result = json.loads(result_path.read_text())
-            except Exception:
-                pass
-    if result is None:
-        return {"success": False, "error": "Export not ready", "trace_id": rid}
-
-    return {"success": True, "job_id": job_id, "result": result, "trace_id": rid}
-
-
-@app.get("/api/export/{job_id}/download")
-async def api_export_download(job_id: str, request: Request):
-    rid = uuid.uuid4().hex[:8]
-    if not _safe_run_id(job_id):
-        return JSONResponse(status_code=400, content={"success": False, "error": "Invalid job ID", "trace_id": rid})
-    if not _can_access_export(request, job_id):
-        return JSONResponse(status_code=404, content={"success": False, "error": "CSV file not found", "trace_id": rid})
-
-    csv_path = RUNS_DIR / job_id / "videos.csv"
-    if not csv_path.exists():
-        return JSONResponse(status_code=404, content={"success": False, "error": "CSV file not found", "trace_id": rid})
-    if csv_path.stat().st_size == 0:
-        return JSONResponse(status_code=422, content={"success": False, "error": "CSV file is empty", "trace_id": rid})
-
-    return FileResponse(str(csv_path), media_type="text/csv", filename="videos.csv")
-
-
-@app.post("/api/export/{job_id}/cancel")
-async def api_export_cancel(job_id: str, request: Request) -> dict:
-    rid = uuid.uuid4().hex[:8]
-    if not _safe_run_id(job_id):
-        return {"success": False, "error": "Invalid job ID", "trace_id": rid}
-    if not _can_access_export(request, job_id):
-        return {"success": False, "error": "Job not running or already completed", "trace_id": rid}
-
-    async with _running_tasks_lock:
-        task = _running_tasks.get(job_id)
-        if task and not task.done():
-            task.cancel()
-            _running_tasks.pop(job_id, None)
-            logger.info("[%s] Job %s cancelled", rid, job_id)
-            return {"success": True, "job_id": job_id, "status": "cancelled", "trace_id": rid}
-    return {"success": False, "error": "Job not running or already completed", "trace_id": rid}
-
-
-@app.delete("/api/export/{job_id}")
-async def api_export_delete(job_id: str, request: Request):
-    rid = uuid.uuid4().hex[:8]
-    if not _safe_run_id(job_id):
-        return {"success": False, "error": "Invalid job ID", "trace_id": rid}
-    if not _can_access_export(request, job_id):
-        return _not_found(rid)
-    run_dir = RUNS_DIR / job_id
-    if run_dir.exists():
-        shutil.rmtree(str(run_dir), ignore_errors=True)
-    return {"success": True, "job_id": job_id, "trace_id": rid}
-
-
-@app.get("/api/export/jobs/active")
-async def api_export_active() -> dict:
-    async with _running_tasks_lock:
-        jobs = [
-            {"job_id": jid, "status": "running"}
-            for jid in _running_tasks
-            if not _running_tasks[jid].done()
-        ]
-    return {"success": True, "count": len(jobs), "jobs": jobs}
-
-
-# ---------------------------------------------------------------------------
-# Monitoring & Metrics
+# Health
 # ---------------------------------------------------------------------------
 
 
 @app.get("/api/health")
 async def api_health(request: Request):
-    key_ok, key_error = is_youtube_api_key_valid()
-    if _principal(request) is None:
-        # Anonymous probes (load balancers, uptime checks) only learn the coarse status.
-        return success_response(data={"status": "ok" if key_ok else "degraded"}, message="Service health check")
-    redis_healthy = False
-    try:
-        import redis as _redis
-        r = _redis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=2)
-        r.ping()
-        redis_healthy = True
-    except Exception:
-        pass
-    import shutil
-    base_path = Path(__file__).resolve().parent.parent
-    usage = shutil.disk_usage(base_path)
-    disk_healthy = usage.free / usage.total > 0.1
-    status = "ok" if key_ok else "degraded"
-    if not key_ok:
-        logger.warning("Health check: degraded state - %s", key_error)
-    async with _running_tasks_lock:
-        active_count = len([t for t in _running_tasks.values() if not t.done()])
-    return success_response(
-        data={
-            "status": status,
-            "version": "3.0",
-            "database": {"healthy": True, "type": "filesystem"},
-            "redis": {"healthy": redis_healthy},
-            "storage": {"healthy": disk_healthy, "free_percent": round(usage.free / usage.total * 100, 1)},
+    """Cheap, non-blocking health probe.
+
+    Returns 503 when the service cannot do useful work (missing YouTube API key or
+    job storage not writable). Anonymous callers only learn the coarse status.
+    """
+    from services.jobs.transcript_job_manager import transcript_job_manager
+
+    key_ok, _ = is_youtube_api_key_valid()
+    storage_ok = transcript_job_manager.storage_writable()
+    healthy = key_ok and storage_ok
+    status_code = 200 if healthy else 503
+    data: dict = {"status": "ok" if healthy else "unhealthy"}
+    if _principal(request) is not None:
+        data.update({
             "youtube_api_key_configured": key_ok,
-            "youtube_api_key_error": key_error if not key_ok else None,
-            "active_exports": active_count,
-        },
-        message="Service health check",
-    )
-
-
-@app.get("/api/metrics")
-async def api_metrics():
-    return metrics.get_metrics()
-
-
-@app.get("/api/quota")
-async def api_quota():
-    return {"success": True, "quota": quota_tracker.usage()}
-
-
-@app.get("/api/cache/stats")
-async def api_cache_stats():
-    from infrastructure.cache import cache_service
-    return {"success": True, "cache": cache_service.stats}
-
-
-@app.get("/api/active-exports")
-async def api_active_exports():
-    return await api_export_active()
+            "groq_api_key_configured": bool(settings.groq_api_key),
+            "job_storage_writable": storage_ok,
+            "active_jobs": transcript_job_manager.active_job_count(),
+        })
+    return success_response(data=data, message="Service health check", status_code=status_code)
 
 
 # ---------------------------------------------------------------------------
 # Core Services & Helpers
 # ---------------------------------------------------------------------------
 
-import contextvars
-_request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="")
-
-_url_parser = None
-_metadata_service = None
 _transcript_service = None
-_transcript_processor = None
 _channel_service = None
 _video_service = None
-
-
-def _get_request_id() -> str:
-    rid = _request_id_var.get()
-    if not rid:
-        rid = uuid.uuid4().hex[:8]
-        _request_id_var.set(rid)
-    return rid
-
-
-def _get_url_parser():
-    global _url_parser
-    if _url_parser is None:
-        from services.youtube_url_parser import YouTubeURLParser
-        _url_parser = YouTubeURLParser()
-    return _url_parser
-
-
-def _get_metadata_service():
-    global _metadata_service
-    if _metadata_service is None:
-        from services.youtube_metadata_service import YouTubeMetadataService
-        _metadata_service = YouTubeMetadataService()
-    return _metadata_service
 
 
 def _get_transcript_service():
@@ -614,14 +280,6 @@ def _get_transcript_service():
         from services.transcript_service import TranscriptService
         _transcript_service = TranscriptService()
     return _transcript_service
-
-
-def _get_transcript_processor():
-    global _transcript_processor
-    if _transcript_processor is None:
-        from services.transcript_processor import TranscriptProcessor
-        _transcript_processor = TranscriptProcessor()
-    return _transcript_processor
 
 
 def _get_channel_service():
@@ -712,7 +370,7 @@ async def api_transcript_unified(request: UnifiedTranscriptRequest):
       8. Defaults to 'en' (Simple English) with strict educational pedagogical simplification
     """
     from exceptions import YouTubeURLError
-    from observability.transcript_metrics import transcript_metrics
+    from services.transcript_metrics import transcript_metrics
     from services.transcription.groq import (
         GroqAuthError,
         GroqRateLimitError,
@@ -963,7 +621,7 @@ async def api_transcript_unified(request: UnifiedTranscriptRequest):
 @app.get("/api/transcript/metrics")
 async def api_transcript_metrics():
     """Retrieve production transcript and STT monitoring metrics."""
-    from observability.transcript_metrics import transcript_metrics
+    from services.transcript_metrics import transcript_metrics
     return {
         "success": True,
         "metrics": transcript_metrics.get_snapshot(),
@@ -971,109 +629,14 @@ async def api_transcript_metrics():
 
 
 @app.get("/api/transcript/limiter/status")
-@app.get("/api/transcript-limiter/status")
 async def api_transcript_limiter_status():
     """Return current transcript rate limiter and circuit breaker diagnostic metrics."""
-    from transcript_reliability.transcript_limiter import transcript_limiter
+    from services.transcript_limiter import transcript_limiter
     return success_response(data=transcript_limiter.get_status())
-
-
-@app.get("/api/transcript/{video_id}")
-async def api_transcript(
-    video_id: str = PathParam(pattern=_VIDEO_ID_PATTERN),
-    language: str | None = Query(None, max_length=16),
-    force_refresh: bool = False,
-    allow_whisper: bool = True,
-) -> dict:
-    rid = uuid.uuid4().hex[:8]
-    logger.info("[%s] Transcript request: video_id=%s", rid, video_id)
-    try:
-        service = _get_transcript_service()
-        result = await _to_thread(service.get_transcript, video_id=video_id, language=language, force_refresh=force_refresh, allow_whisper=allow_whisper)
-        return result.model_dump()
-    except Exception as exc:
-        logger.exception("[%s] Transcript fetch failed for %s", rid, video_id)
-        raise
-
-
-@app.get("/api/transcript/{video_id}/all")
-async def api_transcript_all(video_id: str = PathParam(pattern=_VIDEO_ID_PATTERN)) -> dict:
-    rid = uuid.uuid4().hex[:8]
-    service = _get_transcript_service()
-    return await _to_thread(service.get_all_transcripts, video_id)
-
-
-@app.get("/api/transcript/{video_id}/status")
-async def api_transcript_status(video_id: str = PathParam(pattern=_VIDEO_ID_PATTERN)) -> dict:
-    service = _get_transcript_service()
-    return await _to_thread(service.get_transcript_status, video_id)
-
-
-@app.get("/api/transcript/{video_id}/translate/{target_language}")
-async def api_translate_transcript(
-    video_id: str = PathParam(pattern=_VIDEO_ID_PATTERN),
-    target_language: str = PathParam(pattern=_LANG_RE.pattern),
-) -> dict:
-    rid = uuid.uuid4().hex[:8]
-    try:
-        service = _get_transcript_service()
-        result = await _to_thread(service.translate_transcript, video_id=video_id, target_language=target_language)
-        return result.model_dump()
-    except Exception as exc:
-        logger.exception("[%s] Translation failed", rid)
-        raise
-
-
-@app.get("/api/transcript/{video_id}/list-all")
-async def api_transcript_list_all(video_id: str = PathParam(pattern=_VIDEO_ID_PATTERN)) -> dict:
-    try:
-        service = _get_transcript_service()
-        return await _to_thread(service.get_transcript_status, video_id)
-    except Exception:
-        logger.exception("Transcript list-all failed for %s", video_id)
-        return {"success": False, "video_id": video_id, "error": "Failed to list transcripts."}
-
-
-@app.post("/api/transcript/{video_id}/process")
-async def api_process_transcript(video_id: str = PathParam(pattern=_VIDEO_ID_PATTERN), remove_fillers: bool = False) -> dict:
-    import json
-    transcript_service = _get_transcript_service()
-    transcript = await _to_thread(transcript_service.get_transcript, video_id)
-    if not transcript.success:
-        raise HTTPException(status_code=404, detail={"success": False, "error": transcript.error or "No transcript available."})
-    processor = _get_transcript_processor()
-    result = await _to_thread(processor.process, segments=transcript.segments, video_id=video_id, remove_fillers=remove_fillers)
-    return json.loads(result.model_dump_json())
-
-
-@app.post("/api/process-transcript")
-async def api_process_transcript_direct(request: Request) -> dict:
-    import json
-    body = await request.json()
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=422, detail={"success": False, "error": "Request body must be a JSON object."})
-    segments = body.get("segments", [])
-    vid = body.get("video_id", "")
-    remove = body.get("remove_fillers", False)
-    if not segments:
-        raise HTTPException(status_code=400, detail={"success": False, "error": "No segments provided."})
-    if not isinstance(segments, list) or len(segments) > _MAX_SEGMENTS:
-        raise HTTPException(status_code=422, detail={"success": False, "error": f"segments must be a list of at most {_MAX_SEGMENTS} items."})
-    if not isinstance(vid, str) or len(vid) > 64:
-        raise HTTPException(status_code=422, detail={"success": False, "error": "Invalid video_id."})
-    processor = _get_transcript_processor()
-    result = await _to_thread(processor.process, segments=segments, video_id=vid, remove_fillers=remove)
-    return json.loads(result.model_dump_json())
-
-
-# ---------------------------------------------------------------------------
-# ISO 8601 Duration Helpers
-# ---------------------------------------------------------------------------
 
 
 def _parse_iso_duration(iso: str) -> int:
     """Parse ISO 8601 duration string (e.g. PT15M51S, PT1H2M3S) to total seconds."""
-    import re
     match = re.match(r'^PT?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$', iso)
     if not match:
         return 0
@@ -1091,106 +654,6 @@ def _format_duration(total_seconds: int) -> str:
     if hours > 0:
         return f"{hours}:{minutes:02d}:{seconds:02d}"
     return f"{minutes}:{seconds:02d}"
-
-
-# --- Simplified Transcript v2 endpoint (Workflow 2 — returns ONLY title, duration, transcript) ---
-
-
-@app.get("/api/transcriptv2/{video_id}")
-async def api_transcript_v2(video_id: str = PathParam(pattern=_VIDEO_ID_PATTERN)):
-    """Return ONLY title, duration, and transcript text for a video.
-
-    Minimal endpoint for the simplified Transcript workflow. Fetches only
-    the bare minimum metadata (title, duration) alongside the transcript.
-    No statistics, no segments, no pipeline info, no source metadata.
-    """
-    rid = uuid.uuid4().hex[:8]
-    logger.info("[%s] Transcript v2 request: video_id=%s", rid, video_id)
-
-    title = ""
-    duration = "0:00"
-    transcript_text = ""
-
-    # Fetch minimal metadata (only title + duration needed)
-    try:
-        video_svc = _get_video_service()
-        items = await _to_thread(video_svc.get_videos_batch, [video_id])
-        if items:
-            snippet = items[0].get("snippet", {})
-            cd = items[0].get("contentDetails", {})
-            title = snippet.get("title", "")
-            channel_title = snippet.get("channelTitle", "")
-            duration = _format_duration(_parse_iso_duration(cd.get("duration", "PT0S")))
-    except Exception as exc:
-        logger.warning("[%s] Minimal metadata fetch failed for %s: %s", rid, video_id, exc)
-
-    # Fetch transcript
-    transcript = None
-    try:
-        transcript_svc = _get_transcript_service()
-        transcript = await _to_thread(
-            transcript_svc.get_transcript,
-            video_id,
-            video_title=title,
-            channel_title=channel_title if 'channel_title' in locals() else None,
-        )
-        if transcript.success:
-            transcript_text = transcript.plain_text or transcript.paragraph_text or ""
-    except Exception as exc:
-        logger.warning("[%s] Transcript fetch failed for %s: %s", rid, video_id, exc)
-
-    status = "success" if (transcript and transcript.success and transcript_text) else "failed"
-    source = None
-    method = None
-    language = "en"
-    raw_transcript_text = getattr(transcript, "raw_transcript", "") or transcript_text
-    error_code = None
-    error_message = None
-
-    if transcript:
-        source = getattr(transcript.source, "value", str(transcript.source)) if transcript.source else None
-        method = getattr(transcript, "method", None)
-        if getattr(transcript, "source_language", None):
-            language = transcript.source_language
-        elif str(transcript.language).lower() in ("hi", "hindi") or (raw_transcript_text and english_converter.contains_non_roman_script(raw_transcript_text)):
-            language = "Hindi"
-        else:
-            language = transcript.language or "English"
-
-        if not transcript.success:
-            error_code = getattr(transcript, "error_code", None) or "TRANSCRIPT_NOT_FOUND"
-            error_message = transcript.error or "Failed to fetch transcript"
-
-    if status == "failed":
-        if not error_code:
-            error_code = "TRANSCRIPT_NOT_FOUND"
-            error_message = "No transcript could be extracted for this video."
-        if error_code == "VIDEO_UNAVAILABLE" and not error_message:
-            error_message = "This video is unavailable, private, or deleted."
-
-    is_non_roman = False
-    if isinstance(raw_transcript_text, str) and raw_transcript_text:
-        is_non_roman = english_converter.contains_non_roman_script(raw_transcript_text)
-    script = "Devanagari" if is_non_roman else "Standard"
-
-    logger.info("[%s] Returning v2 result for %s: title='%s', status='%s', method='%s', len=%d",
-                rid, video_id, title, status, method, len(transcript_text))
-
-    return {
-        "video_id": video_id,
-        "video_url": f"https://www.youtube.com/watch?v={video_id}",
-        "title": title,
-        "duration": duration,
-        "language": language,
-        "script": script,
-        "status": status,
-        "transcript": transcript_text,
-        "raw_transcript": raw_transcript_text,
-        "source": source,
-        "method": method,
-        "error_code": error_code,
-        "error_message": error_message,
-    }
 
 
 # --- Channel Transcript endpoint ---
@@ -1334,7 +797,7 @@ async def api_channel_transcripts(
             "[%s] Stage 5/5: Fetching transcripts for %d eligible videos (concurrency=%d)",
             rid, len(eligible_videos), concurrency,
         )
-        from transcript_reliability.transcript_limiter import transcript_limiter
+        from services.transcript_limiter import transcript_limiter
         eff_concurrency = min(concurrency, settings.transcript_max_concurrency)
         semaphore = asyncio.Semaphore(eff_concurrency)
 
@@ -2107,15 +1570,6 @@ async def api_validate_url(url: str = Query("", max_length=2048)) -> dict:
     from services.youtube_url_parser import YouTubeURLParser
     parser = YouTubeURLParser()
     result = await _to_thread(parser.parse, url)
-    return result.model_dump()
-
-
-# --- Video metadata endpoint ---
-
-@app.get("/api/video-metadata/{video_id}")
-async def api_video_metadata(video_id: str = PathParam(pattern=_VIDEO_ID_PATTERN)) -> dict:
-    service = _get_metadata_service()
-    result = await _to_thread(service.get_metadata, video_id)
     return result.model_dump()
 
 

@@ -1,21 +1,70 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { transcriptService } from '../services/TranscriptService';
 import { getLanguageLabel } from '../types';
 
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
 describe('TranscriptService', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
   beforeEach(() => {
-    transcriptService.clearCache();
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
   });
 
-  it('should clear cache', () => {
-    transcriptService.clearCache();
-    const trans = transcriptService.getCachedTranslation('test1234567', 'hi');
-    expect(trans).toBeUndefined();
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
-  it('should have empty cache initially', () => {
-    const trans = transcriptService.getCachedTranslation('test1234567', 'hi');
-    expect(trans).toBeUndefined();
+  it('posts the selected output language to the unified transcript endpoint', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ success: true, output_language: 'original', transcript: 'x' }));
+    await transcriptService.fetchUnifiedTranscript('https://youtu.be/dQw4w9WgXcQ', 'original');
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/transcript');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual({ video_url: 'https://youtu.be/dQw4w9WgXcQ', output_language: 'original' });
+  });
+
+  it('surfaces the backend error code and retryability', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ success: false, error_code: 'INVALID_YOUTUBE_URL', message: 'bad url', retryable: false }, 400),
+    );
+    await expect(transcriptService.fetchUnifiedTranscript('nope', 'en')).rejects.toMatchObject({
+      message: 'bad url',
+      error_code: 'INVALID_YOUTUBE_URL',
+      retryable: false,
+    });
+  });
+
+  it('encodes the channel handle and output language for channel transcripts', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ success: true, data: { videos: [] } }));
+    await transcriptService.fetchChannelTranscriptsSimple('@my chan', 10, 2, false, 'hi');
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/channel/%40my%20chan/transcripts?limit=10&concurrency=2&allow_whisper=false&output_language=hi');
+  });
+
+  it('sends the job output language in the job creation body', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ success: true, data: { job_id: 'abcdef012345' } }));
+    const job = await transcriptService.startTranscriptJob('chan', 25, false, '2024-01-01', null, 'original');
+    expect(job.job_id).toBe('abcdef012345');
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('/api/channel/chan/transcript-job');
+    expect(JSON.parse(init.body)).toEqual({
+      max_videos: 25,
+      force_refresh: false,
+      published_after: '2024-01-01',
+      published_before: null,
+      output_language: 'original',
+    });
+  });
+
+  it('builds an encoded job download URL', () => {
+    expect(transcriptService.getJobDownloadUrl('abcdef012345')).toBe('/api/transcript/jobs/abcdef012345/download');
   });
 });
 
@@ -32,19 +81,7 @@ describe('getLanguageLabel', () => {
     expect(getLanguageLabel('es')).toBe('Spanish');
   });
 
-  it('should return French for fr', () => {
-    expect(getLanguageLabel('fr')).toBe('French');
-  });
-
-  it('should return German for de', () => {
-    expect(getLanguageLabel('de')).toBe('German');
-  });
-
   it('should uppercase unknown codes', () => {
     expect(getLanguageLabel('xyz')).toBe('XYZ');
-  });
-
-  it('should support dynamically added languages via uppercase fallback', () => {
-    expect(getLanguageLabel('sw')).toBe('SW');
   });
 });

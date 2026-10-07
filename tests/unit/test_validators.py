@@ -42,12 +42,3 @@ class TestTranscriptValidator:
         data = {"plain_text": "", "segments": []}
         with pytest.raises(EmptyTranscriptError):
             tv.validate_segments(data["segments"])
-
-
-class TestExportValidator:
-    def test_validate_request(self):
-        from export_engine.models import ExportRequest
-        req = ExportRequest(channel_input="@test")
-        assert req.channel_input == "@test"
-        assert req.limit == 0
-

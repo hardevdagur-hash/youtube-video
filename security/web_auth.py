@@ -73,15 +73,10 @@ PUBLIC_ENDPOINTS = frozenset({
 
 # Operational endpoints restricted to admins.
 ADMIN_PATHS = frozenset({
-    "/api/metrics",
-    "/api/quota",
-    "/api/cache/stats",
-    "/api/active-exports",
     "/api/transcript/metrics",
     "/api/transcript/limiter/status",
-    "/api/transcript-limiter/status",
 })
-ADMIN_PREFIXES = ("/api/export/jobs/",)
+ADMIN_PREFIXES: tuple[str, ...] = ()
 
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 _DEV_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
@@ -420,12 +415,9 @@ def is_admin_path(path: str) -> bool:
 
 def is_costly(method: str, path: str) -> bool:
     """Routes that spend YouTube quota, Groq/Whisper credits or heavy CPU."""
-    if method == "POST" and path in ("/api/export", "/api/transcript", "/api/transcript/export",
-                                     "/api/process-transcript"):
+    if method == "POST" and path in ("/api/transcript", "/api/transcript/export"):
         return True
     if path.startswith("/api/channel/"):
-        return True
-    if path.startswith("/api/transcriptv2/"):
         return True
     if method == "POST" and path.startswith("/api/transcript/jobs/") and path.endswith("/resume"):
         return True

@@ -6,16 +6,6 @@ import pytest
 os.environ.setdefault("YOUTUBE_API_KEY", "test_key_for_testing")
 
 
-@pytest.fixture(autouse=True)
-def isolated_metrics_registry(monkeypatch):
-    """Fresh Prometheus registry per test (MetricsManager defaults to the global one)."""
-    from prometheus_client import CollectorRegistry
-
-    registry = CollectorRegistry()
-    monkeypatch.setattr("observability.metrics.REGISTRY", registry)
-    return registry
-
-
 # ---------------------------------------------------------------------------
 # Web authentication fixtures
 # ---------------------------------------------------------------------------

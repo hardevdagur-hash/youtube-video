@@ -1,29 +1,11 @@
-"""Transcript Service — multi-stage transcript retrieval orchestration (DEPRECATED).
+"""Transcript Service — caption-first transcript retrieval used by channel jobs and CSV export.
 
-DEPRECATED: Use ``transcript_reliability.TranscriptManager`` instead.
-This module is kept for backward compatibility and delegates to TranscriptManager.
-
-The new TranscriptManager provides:
-- 6+ providers with automatic failover
-- Retry engine with exponential backoff
-- Circuit breaker for failing providers
-- Provider health monitoring
-- Multi-level caching (L1 memory, L2 Redis, L3 DB)
-- Transcript validation (12-point checks)
-- Duplicate removal (6 strategies)
-- Silence detection (6 patterns)
-- Quality scoring (8 dimensions)
-- Version management (7 version types)
-
-Migration::
-    from transcript_reliability import TranscriptManager
-    manager = TranscriptManager()
-    result = manager.get_transcript(video_id="dQw4w9WgXcQ")
+Pipeline: cache -> manual captions -> auto captions -> Whisper speech-to-text fallback.
+Results are cached through ``TranscriptRepository``.
 """
 
 import logging
 import time
-import warnings
 from typing import Any
 
 from models.transcript import (
@@ -57,12 +39,6 @@ from services.transliteration import hinglish_normalizer
 from services.english_converter import english_converter
 
 logger = logging.getLogger(__name__)
-
-warnings.warn(
-    "TranscriptService is deprecated. Use TranscriptManager from transcript_reliability instead.",
-    DeprecationWarning,
-    stacklevel=2,
-)
 
 
 class TranscriptService:
@@ -470,7 +446,7 @@ class TranscriptService:
                 transcript = provider.get_transcript(video_id, language=language)
             if transcript.success and transcript.segments:
                 try:
-                    from transcript_reliability.transcript_limiter import transcript_limiter
+                    from services.transcript_limiter import transcript_limiter
                     transcript_limiter.record_success(video_id)
                 except Exception:
                     pass
@@ -494,7 +470,7 @@ class TranscriptService:
 
             if isinstance(exc, (ClientTooManyRequestsError,)) or "rate limit" in str(exc).lower() or "too many requests" in str(exc).lower() or "429" in str(exc):
                 try:
-                    from transcript_reliability.transcript_limiter import transcript_limiter
+                    from services.transcript_limiter import transcript_limiter
                     transcript_limiter.record_rate_limit(video_id)
                 except Exception:
                     pass

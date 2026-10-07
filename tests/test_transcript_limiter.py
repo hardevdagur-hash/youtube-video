@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from transcript_reliability.transcript_limiter import CircuitState, TranscriptRateLimiter
+from services.transcript_limiter import CircuitState, TranscriptRateLimiter
 
 
 def test_limiter_initial_state():

@@ -6,33 +6,18 @@ export default defineConfig({
   base: '/',
   build: {
     outDir: 'dist',
-    sourcemap: true,
+    // No source maps in the production bundle: they would publish the full frontend source.
+    sourcemap: false,
   },
   server: {
     port: 5173,
     strictPort: false,
     proxy: {
-      '/run': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-        timeout: 30000,
-        proxyTimeout: 30000,
-      },
       '/api': {
         target: 'http://localhost:8000',
         changeOrigin: true,
         timeout: 300000,
         proxyTimeout: 300000,
-      },
-      '/dashboard': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-      },
-      '/static': {
-        target: 'http://localhost:8000',
-        changeOrigin: true,
-        timeout: 30000,
-        proxyTimeout: 30000,
       },
     },
   },

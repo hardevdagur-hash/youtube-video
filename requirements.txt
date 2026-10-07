@@ -1,43 +1,32 @@
-# =============================================================================
-# YouTube Export Tool v2 — Production Dependencies (FastAPI + Async Platform)
-# =============================================================================
+# Runtime dependencies of the transcript service (webapp.main). Keep this list
+# limited to packages the production code imports; dev/test tools live in
+# requirements-dev.txt.
 
-# Core & Configuration
+# Web framework / server
+fastapi>=0.115.0,<1.0.0
+uvicorn[standard]>=0.30.0,<1.0.0
+pydantic>=2.7.0,<3.0.0
 python-dotenv>=1.0.1
-pydantic>=2.7.0
-pydantic-settings>=2.0.0
 
-# FastAPI / ASGI Web Server
-fastapi>=0.100.0
-uvicorn[standard]>=0.20.0
-python-multipart>=0.0.18
+# Authentication (session tokens)
+pyjwt>=2.8.0,<3.0.0
 
-# YouTube Data API v3
+# YouTube Data API v3 (channel resolution, playlists, video metadata)
 google-api-python-client>=2.115.0,<3.0.0
 google-auth>=2.29.0,<3.0.0
 google-auth-httplib2>=0.2.0,<1.0.0
-
-# SSL / HTTP Clients
 httplib2>=0.22.0,<0.32.0
+
+# Captions
+youtube-transcript-api>=1.2.0,<2.0.0
 requests>=2.31.0,<3.0.0
 urllib3>=1.26.18,<3.0.0
-httpx[http2]>=0.27.0,<1.0.0
-h2>=4.1.0
 certifi>=2024.2.0
 
-# YouTube Transcript & Extraction
-youtube-transcript-api>=0.6.2,<2.0.0
+# Speech-to-text fallback (audio download + Groq Whisper) and translation (Groq LLM)
 yt-dlp>=2024.12.0
-groq>=0.9.0
+groq>=0.9.0,<2.0.0
+httpx>=0.27.0,<1.0.0
+
+# Language detection for transcript post-processing
 langdetect>=1.0.9
-
-# Data Processing & Analysis
-pandas>=2.2.0
-
-# Caching & Distributed Locks
-redis>=5.0.0
-
-# Observability & Security
-prometheus-client>=0.20.0
-pyjwt>=2.8.0
-

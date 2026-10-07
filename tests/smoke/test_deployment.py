@@ -1,106 +1,78 @@
-"""Smoke tests to verify deployment is healthy."""
+"""Deployment smoke tests, run against a live stack (never part of the default unit run).
+
+    SMOKE_TEST_URL=https://transcripts.example.com pytest -m smoke tests/smoke
+
+Optional: SMOKE_TEST_API_KEY (a key from API_KEYS) enables the authenticated checks.
+SMOKE_TEST_INSECURE=1 skips TLS verification (self-signed staging certificates only).
+"""
+
+from __future__ import annotations
+
 import os
 
-import pytest
 import httpx
+import pytest
 
-BASE_URL = os.environ.get("SMOKE_TEST_URL", "http://localhost:8000")
+pytestmark = pytest.mark.smoke
+
+BASE_URL = os.environ.get("SMOKE_TEST_URL", "http://localhost:8000").rstrip("/")
 TIMEOUT = float(os.environ.get("SMOKE_TEST_TIMEOUT", "30"))
+API_KEY = os.environ.get("SMOKE_TEST_API_KEY", "")
+VERIFY_TLS = os.environ.get("SMOKE_TEST_INSECURE", "") != "1"
 
 
 @pytest.fixture(scope="module")
 def client():
-    with httpx.Client(base_url=BASE_URL, timeout=TIMEOUT, verify=False) as c:
+    with httpx.Client(base_url=BASE_URL, timeout=TIMEOUT, verify=VERIFY_TLS) as c:
         yield c
 
 
-class TestHealthEndpoints:
-    def test_api_health(self, client):
-        resp = client.get("/api/health")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["success"] is True
-
-    def test_api_homepage(self, client):
-        resp = client.get("/")
-        assert resp.status_code in (200, 302, 307)
-
-    def test_static_files(self, client):
-        resp = client.get("/static/")
-        assert resp.status_code in (200, 404)  # 404 is OK if no static index
-
-    def test_cors_headers(self, client):
-        resp = client.options("/api/health", headers={
-            "Origin": "http://localhost:3000",
-            "Access-Control-Request-Method": "GET",
-        })
-        assert "access-control-allow-origin" in resp.headers or resp.status_code in (200, 204)
+def test_health_is_public_and_ok(client):
+    resp = client.get("/api/health")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["success"] is True
+    assert body["data"] == {"status": "ok"}  # anonymous callers learn nothing else
 
 
-class TestAPIEndpoints:
-    def test_api_info(self, client):
-        resp = client.get("/api/info")
-        # Info endpoint may vary; just check it responds
-        assert resp.status_code < 500
-
-    def test_api_metrics(self, client):
-        resp = client.get("/api/metrics")
-        assert resp.status_code in (200, 404)  # 404 if not wired yet
+def test_frontend_served(client):
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "<div id=\"root\">" in resp.text
 
 
-class TestDatabase:
-    def test_db_health(self, client):
-        resp = client.get("/api/health")
-        assert resp.status_code == 200
-        data = resp.json()
-        if "data" in data and "database" in data["data"]:
-            assert data["data"]["database"].get("healthy") in (True,)
+def test_transcript_api_requires_authentication(client):
+    resp = client.post("/api/transcript", json={"video_url": "dQw4w9WgXcQ", "output_language": "original"})
+    assert resp.status_code == 401
+    assert resp.json()["error_code"] == "UNAUTHENTICATED"
 
 
-class TestRedis:
-    def test_redis_connectivity(self, client):
-        resp = client.get("/api/health")
-        assert resp.status_code == 200
-        data = resp.json()
-        if "data" in data and "redis" in data["data"]:
-            assert data["data"]["redis"].get("healthy") in (True, False)
+def test_unknown_api_route_is_not_the_spa(client):
+    resp = client.get("/api/does-not-exist")
+    assert resp.status_code in (401, 404)
 
 
-class TestInfrastructure:
-    def test_security_headers(self, client):
-        resp = client.get("/")
-        headers = resp.headers
-        security_headers = [
-            "x-frame-options",
-            "x-content-type-options",
-            "x-xss-protection",
-            "strict-transport-security",
-            "referrer-policy",
-        ]
-        present = [h for h in security_headers if h in headers]
-        assert len(present) >= 2, f"Few security headers: {present}"
-
-    def test_compression(self, client):
-        resp = client.get("/", headers={"Accept-Encoding": "gzip"})
-        assert resp.status_code in (200, 302, 307)
-
-    def test_tls(self, client):
-        """If using HTTPS, verify TLS."""
-        if BASE_URL.startswith("https://"):
-            import ssl
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            with httpx.Client(base_url=BASE_URL, verify=ctx) as secure_client:
-                resp = secure_client.get("/api/health")
-                assert resp.status_code == 200
+def test_cross_origin_requests_not_allowed(client):
+    resp = client.options("/api/health", headers={
+        "Origin": "https://evil.example",
+        "Access-Control-Request-Method": "GET",
+    })
+    assert resp.headers.get("access-control-allow-origin") not in ("*", "https://evil.example")
 
 
-class TestPipeline:
-    def test_pipeline_health(self, client):
-        resp = client.get("/api/health")
-        assert resp.status_code == 200
+def test_security_headers_present(client):
+    headers = client.get("/").headers
+    assert headers.get("x-content-type-options") == "nosniff"
+    assert "x-frame-options" in headers
+    if BASE_URL.startswith("https://"):
+        assert "max-age=" in headers.get("strict-transport-security", "")
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v", "--tb=short"])
+@pytest.mark.skipif(not API_KEY, reason="SMOKE_TEST_API_KEY not set")
+def test_authenticated_health_details(client):
+    resp = client.get("/api/health", headers={"X-API-Key": API_KEY})
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["youtube_api_key_configured"] is True
+    assert data["job_storage_writable"] is True
