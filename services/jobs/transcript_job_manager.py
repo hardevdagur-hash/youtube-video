@@ -451,10 +451,12 @@ class TranscriptJobManager:
 
             self._check_capacity(job.owner)
 
-            # Reset statuses for resumption
+            # Reset statuses and the per-item retry budget: a resumed item gets fresh attempts
+            # (otherwise items that used their retries while rate-limited would be skipped).
             for v in pending_items:
                 if v.status in ("rate_limited", "processing"):
                     v.status = "pending"
+                v.attempt_count = 0
 
             job.status = JobStatus.RUNNING
             job.error = None
@@ -878,6 +880,9 @@ class TranscriptJobManager:
                     item.completed_at = datetime.now(timezone.utc).isoformat()
                     break
 
+            if item.status == "processing":
+                # Retry budget exhausted without a final outcome: keep it resumable.
+                item.status = "rate_limited" if item.error_code == "RATE_LIMITED" else "pending"
             self._recalculate_counters(job)
             self._save_checkpoint(job)
 
