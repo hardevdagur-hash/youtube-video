@@ -1,89 +1,74 @@
+"""In-process sliding-window rate limiter with bounded memory.
+
+Keys are attacker-influenced (client IPs, attempted usernames), so the limiter must
+not grow without bound: empty buckets are dropped, read-only checks never create
+keys, and the number of tracked keys is capped (stale keys are evicted first, then
+the least recently used ones).
+"""
+
 from __future__ import annotations
 
 import time
-from collections import defaultdict
+from collections import OrderedDict
 from threading import Lock
 
-MAX_WINDOW_ENTRIES = 10000
+MAX_KEYS = 50_000
 
 
 class SlidingWindowRateLimiter:
-    """Sliding window rate limiter per key with bounded memory."""
+    """Allow at most ``max_requests`` events per ``window_seconds`` per key."""
 
-    def __init__(self, max_requests: int = 60, window_seconds: float = 60.0) -> None:
+    def __init__(self, max_requests: int = 60, window_seconds: float = 60.0, max_keys: int = MAX_KEYS) -> None:
+        if max_requests < 1 or window_seconds <= 0 or max_keys < 1:
+            raise ValueError("max_requests, window_seconds and max_keys must be positive")
         self._max_requests = max_requests
         self._window = window_seconds
-        self._buckets: dict[str, list[float]] = defaultdict(list)
+        self._max_keys = max_keys
+        self._buckets: OrderedDict[str, list[float]] = OrderedDict()
         self._lock = Lock()
+
+    def _live(self, key: str, now: float) -> list[float]:
+        """Unexpired timestamps for ``key`` (caller holds the lock); drops empty buckets."""
+        timestamps = self._buckets.get(key)
+        if timestamps is None:
+            return []
+        cutoff = now - self._window
+        timestamps[:] = [t for t in timestamps if t > cutoff]
+        if not timestamps:
+            del self._buckets[key]
+        return timestamps
+
+    def _evict(self, now: float) -> None:
+        cutoff = now - self._window
+        for stale in [k for k, ts in self._buckets.items() if not ts or ts[-1] <= cutoff]:
+            del self._buckets[stale]
+        while len(self._buckets) > self._max_keys:
+            self._buckets.popitem(last=False)
 
     def allow(self, key: str = "default") -> bool:
         now = time.time()
-        cutoff = now - self._window
         with self._lock:
-            timestamps = self._buckets[key]
-            timestamps[:] = [t for t in timestamps if t > cutoff]
+            timestamps = self._live(key, now)
             if len(timestamps) >= self._max_requests:
                 return False
+            if not timestamps:
+                self._buckets[key] = timestamps
             timestamps.append(now)
-            if len(timestamps) > MAX_WINDOW_ENTRIES:
-                timestamps[:] = timestamps[-self._max_requests:]
+            self._buckets.move_to_end(key)
+            if len(self._buckets) > self._max_keys:
+                self._evict(now)
             return True
 
     def remaining(self, key: str = "default") -> int:
         now = time.time()
-        cutoff = now - self._window
         with self._lock:
-            timestamps = self._buckets[key]
-            timestamps[:] = [t for t in timestamps if t > cutoff]
-            return max(0, self._max_requests - len(timestamps))
+            return max(0, self._max_requests - len(self._live(key, now)))
 
     def reset(self, key: str = "default") -> None:
         with self._lock:
-            self._buckets[key] = []
-
-
-class YouTubeQuotaTracker:
-    """Tracks YouTube API quota usage with bounded memory."""
-
-    def __init__(self, daily_quota: int = 10000) -> None:
-        self._daily_quota = daily_quota
-        self._costs: list[tuple[float, int]] = []
-        self._lock = Lock()
+            self._buckets.pop(key, None)
 
     @property
-    def daily_quota(self) -> int:
-        return self._daily_quota
-
-    @daily_quota.setter
-    def daily_quota(self, value: int) -> None:
-        self._daily_quota = value
-
-    def record_call(self, cost: int = 1) -> bool:
-        now = time.time()
-        day_ago = now - 86400
+    def tracked_keys(self) -> int:
         with self._lock:
-            self._costs[:] = [(t, c) for t, c in self._costs if t > day_ago]
-            total = sum(c for _, c in self._costs)
-            if total + cost > self._daily_quota:
-                return False
-            self._costs.append((now, cost))
-            if len(self._costs) > MAX_WINDOW_ENTRIES:
-                self._costs[:] = self._costs[-MAX_WINDOW_ENTRIES:]
-            return True
-
-    def usage(self) -> dict:
-        now = time.time()
-        day_ago = now - 86400
-        with self._lock:
-            self._costs[:] = [(t, c) for t, c in self._costs if t > day_ago]
-            total = sum(c for _, c in self._costs)
-            return {
-                "used": total,
-                "limit": self._daily_quota,
-                "remaining": max(0, self._daily_quota - total),
-                "percent": round((total / self._daily_quota) * 100, 1) if self._daily_quota > 0 else 0,
-            }
-
-
-quota_tracker = YouTubeQuotaTracker()
-rate_limiter = SlidingWindowRateLimiter()
+            return len(self._buckets)
