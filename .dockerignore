@@ -1,16 +1,25 @@
+# VCS / editor / tooling
 .git
 .gitignore
-__pycache__
+.github
+.claude
+.vscode
+.idea
+
+# Secrets: never in the build context (the image gets config from env_file at runtime)
+.env
+.env.*
+!.env.example
+deploy/.env.production
+*.pem
+*.key
+
+# Python caches and virtualenvs
+__pycache__/
 *.pyc
 *.pyo
-.env
-.env.local
 venv
 .venv
-node_modules
-frontend/node_modules
-frontend/src
-tests
 .pytest_cache
 .ruff_cache
 .mypy_cache
@@ -19,11 +28,25 @@ tests
 htmlcov
 .coverage
 coverage.xml
+
+# Frontend: sources are needed by the build stage; local deps/builds are not
+node_modules
+frontend/node_modules
+frontend/dist
+frontend/coverage
+frontend/tsconfig.tsbuildinfo
+
+# Tests are not shipped
+tests
+**/tests
+
+# Local runtime state (production uses volumes)
 *.log
 logs/
 output/
 data/
+tmp/
+webapp/runs/
 exports_versions/
 exports/
-__pycache__/
 .gitkeep

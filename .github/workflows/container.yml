@@ -1,0 +1,91 @@
+name: Container image
+
+# Builds the production image and proves it boots safely. Throwaway credentials are
+# generated per run; no repository secrets are used or required.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-boot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.api
+          tags: yt-export:ci
+          load: true
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Generate throwaway production config
+        run: |
+          set -euo pipefail
+          api_key="ysk_$(openssl rand -hex 32)"
+          {
+            echo "APP_ENV=production"
+            echo "JWT_SECRET_KEY=$(openssl rand -hex 48)"
+            echo "API_KEYS=ci:admin:$(printf '%s' "$api_key" | sha256sum | cut -d' ' -f1)"
+            echo "CORS_ORIGINS=https://ci.invalid"
+            echo "YOUTUBE_API_KEY=ci-placeholder-not-a-real-key"
+            echo "OTEL_ENABLED=false"
+          } > ci.env
+          echo "::add-mask::$api_key"
+          echo "CI_API_KEY=$api_key" >> "$GITHUB_ENV"
+
+      - name: Refuses to start with an unsafe production config
+        run: |
+          set -euo pipefail
+          for override in "CORS_ORIGINS=*" "CORS_ORIGINS=http://ci.invalid" "JWT_SECRET_KEY=short" "APP_ENV=prod"; do
+            if timeout 60 docker run --rm --env-file ci.env -e "$override" yt-export:ci \
+                 python -c "import webapp.main" > out.txt 2>&1; then
+              echo "::error::image started with unsafe setting: ${override%%=*}"; exit 1
+            fi
+            grep -q "AuthConfigError" out.txt || { cat out.txt; echo "::error::unexpected failure for ${override%%=*}"; exit 1; }
+            echo "refused as expected: ${override%%=*}"
+          done
+
+      - name: Boots with a safe config and enforces auth
+        run: |
+          set -euo pipefail
+          docker run -d --name app --env-file ci.env -p 127.0.0.1:8000:8000 yt-export:ci
+          for i in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' app 2>/dev/null)" = "healthy" ] && break
+            [ "$(docker inspect -f '{{.State.Running}}' app)" = "true" ] || { docker logs app; exit 1; }
+            sleep 3
+          done
+          [ "$(docker inspect -f '{{.State.Health.Status}}' app)" = "healthy" ] || { docker logs app; exit 1; }
+          code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+          test "$(code http://127.0.0.1:8000/api/health)" = 200
+          test "$(code http://127.0.0.1:8000/openapi.json)" = 404
+          ! curl -s http://127.0.0.1:8000/docs | grep -qi 'swagger-ui'   # /docs is the SPA's Docs page, never Swagger
+          test "$(code http://127.0.0.1:8000/api/quota)" = 401
+          test "$(code -H "X-API-Key: $CI_API_KEY" http://127.0.0.1:8000/api/quota)" = 200
+          curl -sf http://127.0.0.1:8000/ | grep -qi '<div id="root"'
+          test "$(docker exec app id -u)" = 1000
+          ! curl -sI http://127.0.0.1:8000/api/health | grep -qi '^server: uvicorn'
+          echo "image boots, serves the SPA, enforces auth, runs as non-root"
+
+      - name: Image must not contain secrets or local state
+        run: |
+          set -euo pipefail
+          docker run --rm yt-export:ci sh -c \
+            'test ! -e /app/.env && test -z "$(ls -A /app/data/transcript_jobs)" && test ! -d /app/tests && test ! -d /app/.git'
+
+      - name: Container logs
+        if: always()
+        run: docker logs app 2>&1 | tail -n 100 || true
