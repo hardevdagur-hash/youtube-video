@@ -11,9 +11,11 @@ venv/
 dist/
 build/
 
-# Node
+# Node / Vite build caches
 node_modules/
 frontend/node_modules/
+.vite/
+*.tsbuildinfo
 
 # Output & Logs
 output/
@@ -28,6 +30,7 @@ server2_stdout.txt
 webapp/runs/
 webapp/server.log
 data/transcripts/
+data/transcript_jobs/
 *.db
 
 # IDE
