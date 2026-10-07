@@ -164,7 +164,7 @@ class TestTranscriptPipelineHinglishIntegration:
 
         manager = TranscriptJobManager()
         job = TranscriptJobProgress(
-            job_id="job_hinglish_1",
+            job_id="0ff0ff0ff0ff",
             channel_handle="@physicsgalaxyworld",
             channel_id="UC_test",
             channel_title="Physics Galaxy",

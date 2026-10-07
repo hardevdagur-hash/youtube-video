@@ -1,10 +1,34 @@
 # ruff: noqa: ARG001, S105  (fixture-activation args; fixed test-only credentials)
+import atexit
 import os
+import shutil
+import tempfile
 
 import pytest
 
-os.environ.setdefault("YOUTUBE_API_KEY", "test_key_for_testing")
-os.environ.setdefault("JWT_SECRET_KEY", "test-only-jwt-secret-" + "x" * 32)
+# Isolate every test run from the developer's real data and logs. This must run before
+# config.settings is imported (it reads DATA_DIR / LOG_DIR once), and it overrides any
+# value from the shell or .env on purpose.
+_TEST_ROOT = tempfile.mkdtemp(prefix="transcript-tests-")
+atexit.register(shutil.rmtree, _TEST_ROOT, ignore_errors=True)
+os.environ["DATA_DIR"] = os.path.join(_TEST_ROOT, "data")
+os.environ["LOG_DIR"] = os.path.join(_TEST_ROOT, "logs")
+
+# Never let tests use real credentials from the shell or .env (that would make real,
+# billable YouTube/Groq calls). Empty values win over .env because it never overrides.
+os.environ["YOUTUBE_API_KEY"] = "test_key_for_testing"
+os.environ["GROQ_API_KEY"] = ""
+os.environ["JWT_SECRET_KEY"] = "test-only-jwt-secret-" + "x" * 32
+
+
+@pytest.fixture(autouse=True)
+def _fresh_translation_service():
+    """The translation service is a process-wide singleton; tests patch its class."""
+    from services.translation import service as translation_service
+
+    translation_service.reset_translation_service()
+    yield
+    translation_service.reset_translation_service()
 
 
 # ---------------------------------------------------------------------------

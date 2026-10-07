@@ -311,16 +311,6 @@ class TestTranscriptService:
         service.get_transcript("dQw4w9WgXcQ")
         service.clear_cache()
 
-    def test_transcript_status(self):
-        """Status check should return availability info."""
-        from services.transcript_service import TranscriptService
-
-        service = TranscriptService(use_cache=False)
-        status = service.get_transcript_status("dQw4w9WgXcQ")
-        assert status["video_id"] == "dQw4w9WgXcQ"
-        assert "cached" in status
-
-
 class TestTranscriptServiceIntegration:
     """Integration tests with real dependencies (mocked API)."""
 

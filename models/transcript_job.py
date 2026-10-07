@@ -72,6 +72,7 @@ class TranscriptJobProgress(BaseModel):
     published_before: str | None = None
     output_language: str = "en"
     owner: str | None = None  # authenticated principal that created the job
+    max_videos: int = 0  # discovery cap requested at creation (kept so discovery can be resumed)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     completed_at: str | None = None

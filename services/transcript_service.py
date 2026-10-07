@@ -5,13 +5,13 @@ Results are cached through ``TranscriptRepository``.
 """
 
 import logging
+import re
 import time
 from typing import Any
 
 from models.transcript import (
     TranscriptResult,
     TranscriptSource,
-    TranscriptProviderName,
     PipelineStep,
 )
 from interfaces.transcript_provider import TranscriptProvider
@@ -39,6 +39,13 @@ from services.transliteration import hinglish_normalizer
 from services.english_converter import english_converter
 
 logger = logging.getLogger(__name__)
+
+
+_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+
+
+class SpeechToTextUnavailableError(RuntimeError):
+    """Speech-to-text fallback is disabled or not configured on this server."""
 
 
 class TranscriptService:
@@ -88,9 +95,28 @@ class TranscriptService:
         return getattr(info, "task", None) != "transcribe"
 
     def _get_whisper_provider(self) -> TranscriptProvider:
-        """Lazy-load the Whisper provider (may fail if deps missing)."""
+        """Lazy-load the speech-to-text fallback provider.
+
+        STT_BACKEND=groq (default) uses hosted Groq Whisper; STT_BACKEND=local uses
+        faster-whisper, which needs the optional local ML dependencies.
+
+        Raises:
+            SpeechToTextUnavailableError: STT is disabled or not configured.
+            ImportError: the local backend's dependencies are not installed.
+        """
         if self._whisper_provider is None:
-            self._whisper_provider = WhisperProvider()
+            from config.settings import settings
+
+            if not settings.whisper_enabled:
+                raise SpeechToTextUnavailableError("speech-to-text is disabled (WHISPER_ENABLED=false)")
+            if settings.stt_backend == "groq":
+                if not settings.groq_api_key:
+                    raise SpeechToTextUnavailableError("GROQ_API_KEY is not configured")
+                from clients.groq_stt_client import GroqSpeechToTextClient
+
+                self._whisper_provider = WhisperProvider(stt_client=GroqSpeechToTextClient())
+            else:
+                self._whisper_provider = WhisperProvider()
         return self._whisper_provider
 
     def get_transcript(
@@ -125,7 +151,6 @@ class TranscriptService:
         Raises:
             InvalidVideoIdError: If video_id is malformed.
         """
-        import sys
         self._validate_video_id(video_id)
 
         pipeline_steps: list[dict[str, Any]] = []
@@ -222,11 +247,12 @@ class TranscriptService:
         if allow_whisper and not is_rate_limited:
             try:
                 whisper_provider = self._get_whisper_provider()
-            except ImportError as exc:
+            except (ImportError, SpeechToTextUnavailableError) as exc:
+                logger.warning("Speech-to-text fallback unavailable for %s: %s", video_id, exc)
                 pipeline_steps.append({
                     "name": "Whisper STT",
                     "status": "skipped",
-                    "detail": f"Dependencies not available: {exc}",
+                    "detail": "Speech-to-text is not available on this server.",
                 })
                 whisper_provider = None
 
@@ -270,152 +296,6 @@ class TranscriptService:
             self._repository.save(error_result)
         logger.debug("All transcript stages failed for %s", video_id)
         return error_result
-
-    def get_all_transcripts(self, video_id: str) -> dict[str, Any]:
-        """Retrieve ALL available transcripts separately: manual, auto, translated.
-
-        Never raises exceptions for missing transcripts.
-        Returns null for any transcript that is not available.
-
-        Returns:
-            Dict with:
-                success: bool
-                video_id: str
-                manual: TranscriptResult | None
-                auto: TranscriptResult | None
-                pipeline_steps: list[PipelineStep]
-                available_languages: list[dict]
-        """
-        self._validate_video_id(video_id)
-
-        pipeline_steps: list[dict[str, Any]] = []
-        start_time = time.time()
-
-        result: dict[str, Any] = {
-            "success": True,
-            "video_id": video_id,
-            "manual": None,
-            "auto": None,
-            "whisper": None,
-            "pipeline_steps": [],
-            "available_languages": [],
-        }
-
-        # Manual
-        step_manual = self._execute_stage(
-            "Manual Transcript", video_id, None, self._manual_provider, pipeline_steps,
-        )
-        if step_manual and step_manual.get("status") == "ok":
-            result["manual"] = step_manual["result"]
-            logger.debug("get_all: manual available for %s", video_id)
-        else:
-            logger.debug("get_all: manual not available for %s", video_id)
-
-        # Auto
-        step_auto = self._execute_stage(
-            "Auto Transcript", video_id, None, self._auto_provider, pipeline_steps,
-        )
-        if step_auto and step_auto.get("status") == "ok":
-            result["auto"] = step_auto["result"]
-            logger.debug("get_all: auto available for %s", video_id)
-        else:
-            logger.debug("get_all: auto not available for %s", video_id)
-
-        # Whisper fallback when captions are unavailable.
-        if result["manual"] is None and result["auto"] is None:
-            try:
-                whisper_provider = self._get_whisper_provider()
-            except ImportError as exc:
-                whisper_provider = None
-                pipeline_steps.append({
-                    "name": "Whisper STT",
-                    "status": "skipped",
-                    "detail": f"Dependencies not available: {exc}",
-                })
-
-            if whisper_provider is not None:
-                step_whisper = self._execute_stage(
-                    "Whisper STT", video_id, None, whisper_provider, pipeline_steps,
-                )
-                if step_whisper and step_whisper.get("status") == "ok":
-                    result["whisper"] = step_whisper["result"]
-                    logger.debug("get_all: whisper available for %s", video_id)
-                else:
-                    logger.debug("get_all: whisper not available for %s", video_id)
-
-        # If every source failed, report overall failure.
-        if result["manual"] is None and result["auto"] is None and result["whisper"] is None:
-            result["success"] = False
-            pipeline_steps.append({
-                "name": "Error",
-                "status": "error",
-                "detail": "No transcript available from any source.",
-            })
-
-        # Available languages from whichever succeeded
-        best = result["manual"] or result["auto"] or result["whisper"]
-        if best:
-            result["available_languages"] = best.available_languages or []
-            result["pipeline_steps"] = pipeline_steps
-            # Add finalizing steps
-            elapsed = round(time.time() - start_time, 2)
-            pipeline_steps.append({
-                "name": "Cleaning Transcript",
-                "status": "ok",
-                "detail": f"{best.word_count} words, {best.character_count} chars",
-            })
-            pipeline_steps.append({
-                "name": "Ready",
-                "status": "ok",
-                "detail": f"Retrieved in {elapsed}s",
-            })
-        else:
-            result["pipeline_steps"] = pipeline_steps
-
-        logger.debug("get_all returning for %s: manual=%s, auto=%s",
-                     video_id, 'YES' if result['manual'] else 'NULL', 'YES' if result['auto'] else 'NULL')
-        return result
-
-    def get_transcript_status(self, video_id: str) -> dict[str, Any]:
-        """Check transcript availability without full retrieval.
-
-        Enumerates ALL available transcripts via the YouTube API and
-        returns structured data about each one.
-
-        Args:
-            video_id: 11-character YouTube video ID.
-
-        Returns:
-            Dict with availability info including every available transcript
-            with language, language_code, is_generated, is_translatable.
-        """
-        result: dict[str, Any] = {
-            "video_id": video_id,
-            "cached": False,
-            "available_transcripts": [],
-            "whisper_possible": True,
-        }
-
-        cached = self._repository.get(video_id)
-        if cached is not None:
-            result["cached"] = True
-            result["source"] = cached.source
-
-        try:
-            available = self._manual_provider._client.list_all_transcripts(video_id)
-            result["available_transcripts"] = [
-                {
-                    "language": t["language"],
-                    "language_code": t["language_code"],
-                    "is_generated": t["is_generated"],
-                    "is_translatable": t["is_translatable"],
-                }
-                for t in available
-            ]
-        except Exception as exc:
-            logger.warning("Could not enumerate transcripts for %s: %s", video_id, exc)
-
-        return result
 
     def _execute_stage(
         self,
@@ -649,112 +529,10 @@ class TranscriptService:
     @staticmethod
     def _validate_video_id(video_id: str) -> None:
         """Validate YouTube video ID format."""
-        if not video_id or not isinstance(video_id, str):
-            raise InvalidVideoIdError("Video ID must be a non-empty string.")
-        if len(video_id) != 11:
+        if not isinstance(video_id, str) or not _VIDEO_ID_RE.match(video_id):
             raise InvalidVideoIdError(
-                f"Invalid video ID '{video_id}'. Must be exactly 11 characters."
+                "Invalid video ID: expected 11 characters from [A-Za-z0-9_-]."
             )
-
-    def translate_transcript(
-        self,
-        video_id: str,
-        target_language: str,
-    ) -> TranscriptResult:
-        """Get the transcript in a specific language, translating if necessary.
-
-        Uses YouTube's built-in translation to convert the best available
-        transcript into the target language. Results are cached per language.
-
-        Args:
-            video_id: 11-character YouTube video ID.
-            target_language: Language code to translate to (e.g. "en", "hi").
-
-        Returns:
-            ``TranscriptResult`` with translated segments and updated language.
-        """
-        # Check translation cache first
-        cached = self._repository.get_translation(video_id, target_language)
-        if cached is not None:
-            return cached
-
-        # Get original to ensure transcript exists
-        original = self.get_transcript(video_id)
-        if not original.success:
-            return original
-
-        # If already in target language, return as-is
-        if original.language == target_language:
-            return original
-
-        # Use auto provider's client for translation
-        try:
-            client = self._auto_provider._client
-            available = client.list_all_transcripts(video_id)
-
-            # Look for exact match in target language
-            for t_info in available:
-                t_obj = t_info.get("_transcript")
-                if t_obj and t_obj.language_code == target_language:
-                    raw = client._to_dicts(t_obj.fetch())
-                    segments = client.parse_segments(raw)
-                    segments = self._text_cleaner.clean_segments(segments)
-                    plain_text = " ".join(s.text for s in segments)
-                    word_count = len(plain_text.split())
-                    char_count = len(plain_text)
-                    result = TranscriptResult(
-                        success=True,
-                        video_id=video_id,
-                        source=original.source,
-                        provider=original.provider,
-                        language=target_language,
-                        segments=segments,
-                        plain_text=plain_text,
-                        paragraph_text="\n".join(s.text for s in segments),
-                        word_count=word_count,
-                        character_count=char_count,
-                        estimated_read_time=estimate_read_time(word_count),
-                        available_languages=original.available_languages,
-                    )
-                    self._repository.save_translation(result, target_language)
-                    return result
-
-            # Look for translatable transcript
-            for t_info in available:
-                t_obj = t_info.get("_transcript")
-                if t_obj and t_info.get("is_translatable"):
-                    translated = t_obj.translate(target_language)
-                    raw = client._to_dicts(translated.fetch())
-                    segments = client.parse_segments(raw)
-                    segments = self._text_cleaner.clean_segments(segments)
-                    plain_text = " ".join(s.text for s in segments)
-                    word_count = len(plain_text.split())
-                    char_count = len(plain_text)
-                    result = TranscriptResult(
-                        success=True,
-                        video_id=video_id,
-                        source=original.source,
-                        provider=original.provider,
-                        language=target_language,
-                        translation_source=t_obj.language_code,
-                        segments=segments,
-                        plain_text=plain_text,
-                        paragraph_text="\n".join(s.text for s in segments),
-                        word_count=word_count,
-                        character_count=char_count,
-                        estimated_read_time=estimate_read_time(word_count),
-                        available_languages=original.available_languages,
-                    )
-                    self._repository.save_translation(result, target_language)
-                    return result
-
-            # Fallback: return original
-            logger.warning("No translatable transcript found for %s to %s", video_id, target_language)
-            return original
-
-        except Exception as exc:
-            logger.exception("Translation failed for %s to %s: %s", video_id, target_language, exc)
-            return original
 
     def clear_cache(self) -> None:
         """Clear the transcript result cache."""

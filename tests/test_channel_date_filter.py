@@ -60,7 +60,7 @@ async def test_channel_discovery_with_date_filters(tmp_path):
     manager = TranscriptJobManager(jobs_dir=tmp_path)
 
     progress = TranscriptJobProgress(
-        job_id="test_filter_job",
+        job_id="0dd0dd0dd0dd",
         channel_handle="test_channel",
         channel_id="UC_test",
         channel_title="Test Channel",
@@ -134,7 +134,7 @@ def test_api_channel_transcript_job_accepts_date_filters(client):
     """POST /api/channel/{handle}/transcript-job should accept published_after and published_before."""
     with patch("services.jobs.transcript_job_manager.transcript_job_manager.start_channel_job") as mock_start:
         mock_progress = TranscriptJobProgress(
-            job_id="job_api_date",
+            job_id="0ee0ee0ee0ee",
             channel_handle="test_handle",
             channel_id="UC_test",
             channel_title="Test Handle",
@@ -156,7 +156,7 @@ def test_api_channel_transcript_job_accepts_date_filters(client):
         assert resp.status_code == 200
         data = resp.json()
         assert data["success"] is True
-        assert data["data"]["job_id"] == "job_api_date"
+        assert data["data"]["job_id"] == "0ee0ee0ee0ee"
         assert data["data"]["published_after"] == "2024-01-01"
         assert data["data"]["published_before"] == "2024-06-01"
         assert data["data"]["output_language"] == "en"

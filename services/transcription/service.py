@@ -76,8 +76,10 @@ class TranscriptService:
         self.transcription_provider = transcription_provider or GroqWhisperProvider()
         self.cleaner = cleaner or TranscriptCleaner()
         self.validator = validator or TranscriptValidator()
+        # Own namespace: the channel pipeline (services.transcript_service) caches
+        # mode-dependent results under the same video ids in the parent directory.
         self.repository = repository or TranscriptRepository(
-            persist_dir=str(getattr(settings, "transcript_cache_dir", "data/transcripts"))
+            persist_dir=str(settings.transcript_cache_dir / "canonical")
         )
 
     @staticmethod

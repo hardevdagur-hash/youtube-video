@@ -1,186 +1,185 @@
 """Application settings.
 
-Loads from .env file and validates all required configuration.
-Provides a singleton ``settings`` instance for use throughout the application.
+All configuration comes from environment variables. A ``.env`` file in the project
+root is loaded for local development, but real environment variables (Docker
+``env_file``/``environment``, systemd, CI) always take precedence over it.
+
+Invalid values fail fast at import time with a ``ConfigurationError`` that names
+the variable, so a misconfigured deployment refuses to start instead of running
+with surprising defaults. The YouTube API key is validated where it is used (see
+``is_youtube_api_key_valid``) so the health endpoint can report it.
+
+Storage layout (``DATA_DIR``, default ``<project>/data``; mount it as a volume)::
+
+    DATA_DIR/transcripts/        transcript + translation cache (JSON per video)
+    DATA_DIR/transcript_jobs/    background job checkpoints (JSON per job)
+    DATA_DIR/tmp/audio/          short-lived audio downloads for speech-to-text
 """
+
+from __future__ import annotations
 
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-def _get_env(key: str, default: str = "") -> str:
-    """Get environment variable with fallback default."""
-    return os.getenv(key, default)
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+_ENV_FILE = BASE_DIR / ".env"
+if _ENV_FILE.exists():
+    load_dotenv(dotenv_path=_ENV_FILE, override=False)
 
 
 class ConfigurationError(Exception):
-    """Exception raised when there is an error in application configuration."""
-    pass
+    """Raised when there is an error in application configuration."""
 
 
-# Base directory of the project
-BASE_DIR = Path(__file__).resolve().parent.parent
+def _get_env(key: str, default: str = "") -> str:
+    """Raw environment value with surrounding whitespace removed."""
+    return os.getenv(key, default).strip()
 
-# Load .env before anything else
-_ENV_FILE = BASE_DIR / ".env"
-if _ENV_FILE.exists():
-    load_dotenv(dotenv_path=_ENV_FILE, override=True)
+
+def _env_int(key: str, default: int, minimum: int, maximum: int) -> int:
+    raw = _get_env(key, str(default))
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ConfigurationError(f"{key} must be an integer, got {raw[:32]!r}") from None
+    if not minimum <= value <= maximum:
+        raise ConfigurationError(f"{key} must be between {minimum} and {maximum}, got {value}")
+    return value
+
+
+def _env_float(key: str, default: float, minimum: float, maximum: float) -> float:
+    raw = _get_env(key, str(default))
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ConfigurationError(f"{key} must be a number, got {raw[:32]!r}") from None
+    if not minimum <= value <= maximum:
+        raise ConfigurationError(f"{key} must be between {minimum} and {maximum}, got {value}")
+    return value
+
+
+def _env_bool(key: str, default: bool) -> bool:
+    raw = _get_env(key, "true" if default else "false").lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ConfigurationError(f"{key} must be true or false, got {raw[:32]!r}")
+
+
+def _env_choice(key: str, default: str, choices: tuple[str, ...]) -> str:
+    value = _get_env(key, default).lower()
+    if value not in choices:
+        raise ConfigurationError(f"{key} must be one of {', '.join(choices)}, got {value[:32]!r}")
+    return value
+
+
+def _env_path(key: str, default: Path) -> Path:
+    raw = _get_env(key)
+    path = Path(raw) if raw else default
+    return path if path.is_absolute() else (BASE_DIR / path)
 
 
 _PLACEHOLDER_VALUES = {"", "your_youtube_api_key_here", "your_api_key_here", "your-api-key"}
 
 
 def validate_youtube_api_key(v: str) -> str:
-    """Validate that the YouTube API key is not empty or a placeholder.
-
-    Raises ConfigurationError if the key is missing or a placeholder.
-    """
+    """Return the stripped key; raise ConfigurationError if it is missing or a placeholder."""
     stripped = v.strip()
     if not stripped or stripped.lower() in _PLACEHOLDER_VALUES:
         raise ConfigurationError(
-            f"YouTube API key is missing or has a placeholder value.\n"
-            f"Please add a valid YOUTUBE_API_KEY to your .env file at: {BASE_DIR / '.env'}"
+            "YouTube API key is missing or has a placeholder value. Set YOUTUBE_API_KEY."
         )
     return stripped
 
 
 def is_youtube_api_key_valid() -> tuple[bool, str]:
     """Check if the YouTube API key is configured without raising."""
-    raw = _get_env("YOUTUBE_API_KEY", "")
     try:
-        validate_youtube_api_key(raw)
+        validate_youtube_api_key(_get_env("YOUTUBE_API_KEY", ""))
         return True, ""
     except ConfigurationError as e:
         return False, str(e)
 
 
 class Settings:
-    """Centralized application settings.
-
-    Loads values from environment variables (sourced from .env via python-dotenv).
-    Does NOT raise on missing API key at construction — validation happens at
-    point of use via ``validate_youtube_api_key()``.
-    """
-
-    # Required (validated at point of use)
-    youtube_api_key: str = _get_env("YOUTUBE_API_KEY", "")
-
-    # Optional API key for speech-to-text fallback (Whisper API)
-    openai_api_key: str = _get_env("OPENAI_API_KEY", "")
-
-    # Groq Settings (Primary Paid STT & On-Demand Translation)
-    groq_api_key: str = _get_env("GROQ_API_KEY", "")
-    groq_whisper_model: str = _get_env("GROQ_WHISPER_MODEL", "whisper-large-v3")
-    groq_translation_model: str = _get_env("GROQ_TRANSLATION_MODEL", "llama-3.3-70b-versatile")
-    groq_timeout_seconds: int = int(_get_env("GROQ_TIMEOUT_SECONDS", "120"))
-    groq_max_retries: int = int(_get_env("GROQ_MAX_RETRIES", "3"))
-
-    # Application settings
-    log_level: str = _get_env("LOG_LEVEL", "INFO").upper()
-
-    # Paths
-    base_dir: Path = BASE_DIR
-    logs_dir: Path = BASE_DIR / "logs"
-    output_dir: Path = BASE_DIR / "output"
-
-    # HTTP client settings
-    http_connect_timeout: int = 15
-    http_read_timeout: int = 30
-    http_max_retries: int = 3
-    http_backoff_factor: float = 1.0
-
-    # YouTube API settings
-    youtube_max_results: int = int(_get_env("YOUTUBE_MAX_RESULTS", "50"))
-    youtube_batch_size: int = int(_get_env("YOUTUBE_BATCH_SIZE", "50"))
-    youtube_quota_warning: int = int(_get_env("YOUTUBE_QUOTA_WARNING", "8000"))
-    youtube_daily_quota: int = int(_get_env("YOUTUBE_DAILY_QUOTA", "10000"))
-
-    # Redis
-    redis_url: str = _get_env("REDIS_URL", "redis://localhost:6379/0")
-
-    # Export engine
-    export_max_videos: int = int(_get_env("EXPORT_MAX_VIDEOS", "50000"))
-    export_csv_batch_size: int = int(_get_env("EXPORT_CSV_BATCH_SIZE", "50"))
-    export_timeout_minutes: int = int(_get_env("EXPORT_TIMEOUT_MINUTES", "30"))
-
-    # Transcript & Whisper Settings
-    whisper_enabled: bool = _get_env("WHISPER_ENABLED", "true").lower() in ("true", "1", "yes")
-    whisper_model: str = _get_env("WHISPER_MODEL", "base")
-    whisper_device: str = _get_env("WHISPER_DEVICE", "auto")
-    whisper_compute_type: str = _get_env("WHISPER_COMPUTE_TYPE", "auto")
-    min_transcript_duration: int = int(_get_env("MIN_TRANSCRIPT_DURATION", "180"))
-    max_transcript_duration: int = int(_get_env("MAX_TRANSCRIPT_DURATION", "1800"))
-    transcript_max_concurrency: int = int(_get_env("TRANSCRIPT_MAX_CONCURRENCY", "1"))
-    whisper_max_concurrency: int = int(_get_env("WHISPER_MAX_CONCURRENCY", "1"))
-    transcript_request_interval: float = float(_get_env("TRANSCRIPT_REQUEST_INTERVAL", "2.5"))
-    transcript_rate_limit_cooldown_base: float = float(_get_env("TRANSCRIPT_COOLDOWN_BASE", "30.0"))
-    transcript_rate_limit_cooldown_max: float = float(_get_env("TRANSCRIPT_COOLDOWN_MAX", "300.0"))
-    transcript_max_rate_limit_retries: int = int(_get_env("TRANSCRIPT_MAX_RETRIES", "3"))
-    audio_temp_dir: Path = BASE_DIR / "tmp" / "audio"
-    transcript_cache_dir: Path = BASE_DIR / "data" / "transcripts"
-    transcript_jobs_dir: Path = BASE_DIR / "data" / "transcript_jobs"
-    max_retries: int = int(_get_env("MAX_RETRIES", "3"))
-    retry_backoff_base: float = float(_get_env("RETRY_BACKOFF_BASE", "2.0"))
-
-    # Security
-    rate_limit_per_minute: int = int(_get_env("RATE_LIMIT_PER_MINUTE", "30"))
-    # Comma-separated browser origins allowed for CORS. Empty = same-origin only.
-    cors_origins: str = _get_env("CORS_ORIGINS", "")
-    # Abuse limits on job size (each video can cost YouTube quota and STT credits)
-    max_videos_per_job: int = int(_get_env("MAX_VIDEOS_PER_JOB", "100"))
-    # Synchronous channel requests hold an HTTP connection for the whole run: keep them small.
-    max_videos_sync_export: int = int(_get_env("MAX_VIDEOS_SYNC_EXPORT", "25"))
-    max_concurrent_sync_channel_runs: int = int(_get_env("MAX_CONCURRENT_SYNC_CHANNEL_RUNS", "2"))
-    # Running background jobs (each holds YouTube/Groq capacity for its whole run)
-    max_active_jobs: int = int(_get_env("MAX_ACTIVE_JOBS", "4"))
-    max_active_jobs_per_user: int = int(_get_env("MAX_ACTIVE_JOBS_PER_USER", "2"))
+    """Typed, validated application settings (read once at import)."""
 
     def __init__(self) -> None:
-        """Create directories on initialization."""
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.audio_temp_dir.mkdir(parents=True, exist_ok=True)
-        self.transcript_cache_dir.mkdir(parents=True, exist_ok=True)
-        self.transcript_jobs_dir.mkdir(parents=True, exist_ok=True)
+        # Credentials (never logged; see infrastructure.log_redaction)
+        self.youtube_api_key: str = _get_env("YOUTUBE_API_KEY", "")
+        self.groq_api_key: str = _get_env("GROQ_API_KEY", "")
+
+        # Groq: speech-to-text fallback and Simple English / Simple Hindi rewriting
+        self.groq_whisper_model: str = _get_env("GROQ_WHISPER_MODEL", "whisper-large-v3")
+        self.groq_translation_model: str = _get_env("GROQ_TRANSLATION_MODEL", "llama-3.3-70b-versatile")
+        self.groq_timeout_seconds: int = _env_int("GROQ_TIMEOUT_SECONDS", 120, 5, 900)
+        self.groq_max_retries: int = _env_int("GROQ_MAX_RETRIES", 3, 1, 10)
+
+        # Speech-to-text fallback when a video has no captions
+        self.whisper_enabled: bool = _env_bool("WHISPER_ENABLED", True)
+        # groq: hosted Groq Whisper (production). local: faster-whisper (needs optional ML deps).
+        self.stt_backend: str = _env_choice("STT_BACKEND", "groq", ("groq", "local"))
+        self.whisper_model: str = _get_env("WHISPER_MODEL", "base")
+        self.whisper_device: str = _get_env("WHISPER_DEVICE", "auto")
+        self.whisper_compute_type: str = _get_env("WHISPER_COMPUTE_TYPE", "auto")
+
+        # Logging
+        self.log_level: str = _env_choice(
+            "LOG_LEVEL", "INFO", ("debug", "info", "warning", "error", "critical")
+        ).upper()
+        self.log_to_file: bool = _env_bool("LOG_TO_FILE", True)
+        self.logs_dir: Path = _env_path("LOG_DIR", BASE_DIR / "logs")
+
+        # Persistent storage
+        self.data_dir: Path = _env_path("DATA_DIR", BASE_DIR / "data")
+        self.transcript_cache_dir: Path = self.data_dir / "transcripts"
+        self.transcript_jobs_dir: Path = self.data_dir / "transcript_jobs"
+        self.audio_temp_dir: Path = self.data_dir / "tmp" / "audio"
+
+        # YouTube caption pacing and rate-limit handling (per instance)
+        self.transcript_max_concurrency: int = _env_int("TRANSCRIPT_MAX_CONCURRENCY", 1, 1, 10)
+        self.whisper_max_concurrency: int = _env_int("WHISPER_MAX_CONCURRENCY", 1, 1, 10)
+        self.transcript_request_interval: float = _env_float("TRANSCRIPT_REQUEST_INTERVAL", 2.5, 0.0, 60.0)
+        self.transcript_rate_limit_cooldown_base: float = _env_float("TRANSCRIPT_COOLDOWN_BASE", 30.0, 1.0, 3600.0)
+        self.transcript_rate_limit_cooldown_max: float = _env_float("TRANSCRIPT_COOLDOWN_MAX", 300.0, 1.0, 86400.0)
+        self.transcript_max_rate_limit_retries: int = _env_int("TRANSCRIPT_MAX_RETRIES", 3, 1, 20)
+
+        # Abuse/resource limits (each video can cost YouTube quota and Groq credits)
+        self.max_videos_per_job: int = _env_int("MAX_VIDEOS_PER_JOB", 100, 1, 5000)
+        # Synchronous channel requests hold an HTTP connection for the whole run: keep them small.
+        self.max_videos_sync_export: int = _env_int("MAX_VIDEOS_SYNC_EXPORT", 25, 1, 200)
+        self.max_concurrent_sync_channel_runs: int = _env_int("MAX_CONCURRENT_SYNC_CHANNEL_RUNS", 2, 1, 20)
+        # Running background jobs (each holds YouTube/Groq capacity for its whole run)
+        self.max_active_jobs: int = _env_int("MAX_ACTIVE_JOBS", 4, 1, 50)
+        self.max_active_jobs_per_user: int = _env_int("MAX_ACTIVE_JOBS_PER_USER", 2, 1, 50)
+
+        # Job lifecycle: finished jobs stay on disk this long, then are deleted.
+        self.job_retention_days: int = _env_int("JOB_RETENTION_DAYS", 30, 1, 3650)
+        # Finished jobs kept in memory for fast polling/download (others are read from disk).
+        self.job_memory_cache_size: int = _env_int("JOB_MEMORY_CACHE_SIZE", 8, 0, 1000)
+
+        if self.transcript_rate_limit_cooldown_base > self.transcript_rate_limit_cooldown_max:
+            raise ConfigurationError("TRANSCRIPT_COOLDOWN_BASE must not exceed TRANSCRIPT_COOLDOWN_MAX")
+        if self.max_active_jobs_per_user > self.max_active_jobs:
+            raise ConfigurationError("MAX_ACTIVE_JOBS_PER_USER must not exceed MAX_ACTIVE_JOBS")
+
+    def ensure_directories(self) -> None:
+        """Create the storage directories (raises OSError if the volume is not writable)."""
+        for directory in (self.transcript_cache_dir, self.transcript_jobs_dir, self.audio_temp_dir):
+            directory.mkdir(parents=True, exist_ok=True)
+        if self.log_to_file:
+            self.logs_dir.mkdir(parents=True, exist_ok=True)
 
 
-# Singleton settings instance
+settings = Settings()
 try:
-    settings = Settings()
-except Exception:
-    import logging
-    logging.warning("Failed to initialize Settings directories", exc_info=True)
-
-    class _FallbackSettings:
-        youtube_api_key = _get_env("YOUTUBE_API_KEY", "")
-        log_level = _get_env("LOG_LEVEL", "INFO")
-        base_dir = BASE_DIR
-        logs_dir = BASE_DIR / "logs"
-        output_dir = BASE_DIR / "output"
-        http_connect_timeout = 15
-        http_read_timeout = 30
-        http_max_retries = 3
-        http_backoff_factor = 1.0
-        youtube_max_results = 50
-        youtube_batch_size = 50
-        youtube_quota_warning = 8000
-        youtube_daily_quota = 10000
-        redis_url = _get_env("REDIS_URL", "redis://localhost:6379/0")
-        export_max_videos = 50000
-        export_csv_batch_size = 50
-        export_timeout_minutes = 30
-        rate_limit_per_minute = 30
-        cors_origins = _get_env("CORS_ORIGINS", "")
-        max_videos_per_job = int(_get_env("MAX_VIDEOS_PER_JOB", "1000"))
-        max_videos_sync_export = int(_get_env("MAX_VIDEOS_SYNC_EXPORT", "1000"))
-        openai_api_key = _get_env("OPENAI_API_KEY", "")
-        groq_api_key = _get_env("GROQ_API_KEY", "")
-        groq_whisper_model = _get_env("GROQ_WHISPER_MODEL", "whisper-large-v3")
-        groq_translation_model = _get_env("GROQ_TRANSLATION_MODEL", "llama-3.3-70b-versatile")
-        groq_timeout_seconds = int(_get_env("GROQ_TIMEOUT_SECONDS", "120"))
-        groq_max_retries = int(_get_env("GROQ_MAX_RETRIES", "3"))
-    settings = _FallbackSettings()  # type: ignore[assignment]
+    settings.ensure_directories()
+except OSError as exc:
+    raise ConfigurationError(f"Storage directories are not writable: {exc}") from exc
 
 
 def get_settings() -> Settings:

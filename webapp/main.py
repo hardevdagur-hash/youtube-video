@@ -29,7 +29,6 @@ import asyncio
 import csv
 import functools
 import io
-import json
 import logging
 import re
 import time
@@ -80,13 +79,37 @@ def _to_thread(func, *args, **kwargs):
 # ---------------------------------------------------------------------------
 
 
+_RETENTION_SWEEP_SECONDS = 3600
+
+
+async def _retention_sweeper(manager) -> None:
+    """Hourly job-retention sweep; failures are logged and retried next hour."""
+    while True:
+        await asyncio.sleep(_RETENTION_SWEEP_SECONDS)
+        try:
+            await manager.run_retention_cleanup()
+        except Exception:
+            logger.exception("Transcript job retention sweep failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Transcript service starting (env=%s)", _auth_settings.app_env)
-    yield
     from services.jobs.transcript_job_manager import transcript_job_manager
-    await transcript_job_manager.shutdown()
-    logger.info("Transcript service stopped")
+
+    logger.info(
+        "Transcript service starting (env=%s, data_dir=%s, stt_backend=%s)",
+        _auth_settings.app_env, settings.data_dir, settings.stt_backend,
+    )
+    # Single instance: anything left "running" on disk was interrupted by a crash or kill.
+    await _to_thread(transcript_job_manager.recover_interrupted_jobs)
+    await transcript_job_manager.run_retention_cleanup()
+    sweeper = asyncio.create_task(_retention_sweeper(transcript_job_manager))
+    try:
+        yield
+    finally:
+        sweeper.cancel()
+        await transcript_job_manager.shutdown()
+        logger.info("Transcript service stopped")
 
 
 # Security configuration: fails fast in production when credentials/secrets are unsafe
@@ -343,21 +366,17 @@ def _normalize_output_mode(raw: str | None, default: str) -> str | None:
     return mode if mode in ("original", "en", "hi") else None
 
 
-_shared_transcript_repo = None
 _shared_transcript_service = None
-_shared_translation_service = None
 
 
 def _get_unified_services():
-    global _shared_transcript_repo, _shared_transcript_service, _shared_translation_service
-    if _shared_transcript_repo is None:
-        from repositories.transcript_repository import TranscriptRepository
+    """(canonical transcript service, shared translation service) for the single-video route."""
+    global _shared_transcript_service
+    from services.translation.service import get_translation_service
+    if _shared_transcript_service is None:
         from services.transcription.service import TranscriptService
-        from services.translation.service import TranslationService
-        _shared_transcript_repo = TranscriptRepository(persist_dir="data/transcripts")
-        _shared_transcript_service = TranscriptService(repository=_shared_transcript_repo)
-        _shared_translation_service = TranslationService(repository=_shared_transcript_repo)
-    return _shared_transcript_service, _shared_translation_service
+        _shared_transcript_service = TranscriptService()
+    return _shared_transcript_service, get_translation_service()
 
 
 _OUTPUT_MODE_PATTERN = r"^(original|original_spoken|en|hi)$"
@@ -727,12 +746,6 @@ async def api_channel_transcripts(
                     content_details = item.get("contentDetails", {})
                     duration_iso = content_details.get("duration", "PT0S")
                     duration_seconds = _parse_iso_duration(duration_iso)
-                    thumbnails = snippet.get("thumbnails", {})
-                    thumbnail = None
-                    for quality in ("medium", "high", "standard", "default"):
-                        if quality in thumbnails:
-                            thumbnail = thumbnails[quality].get("url")
-                            break
                     live_status = snippet.get("liveBroadcastContent", "none")
                     videos_metadata[vid] = {
                         "title": snippet.get("title", ""),
@@ -959,7 +972,7 @@ async def api_channel_transcripts(
                 f"for {len(eligible_videos)} eligible videos in {channel_title}"
             ),
         )
-    except Exception as exc:
+    except Exception:
         logger.exception("[%s] Channel transcript failed for %s", rid, handle)
         return error_response(
             message=f"Failed to fetch channel transcripts (trace {rid}).",
@@ -1545,7 +1558,7 @@ async def api_transcript_csv_export(req: TranscriptExportRequest):
             },
         )
 
-    except Exception as exc:
+    except Exception:
         logger.exception("[%s] CSV export failed", rid)
         return error_response(
             message=f"Transcript CSV export failed (trace {rid}).",

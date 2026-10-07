@@ -12,7 +12,7 @@ def test_transcript_job_manager_lifecycle():
     manager = TranscriptJobManager()
 
     job = TranscriptJobProgress(
-        job_id="test_job_123",
+        job_id="012301230123",
         channel_handle="physicsgalaxyworld",
         channel_id="UC_test_chan",
         channel_title="Physics Galaxy",
@@ -67,13 +67,13 @@ def test_transcript_job_manager_lifecycle():
     manager._jobs[job.job_id] = job
 
     # Verify retrieval
-    retrieved = manager.get_job("test_job_123")
+    retrieved = manager.get_job("012301230123")
     assert retrieved is not None
-    assert retrieved.job_id == "test_job_123"
+    assert retrieved.job_id == "012301230123"
     assert retrieved.eligible_videos == 2
 
     # Verify CSV generation has exact 15 columns
-    csv_str = manager.generate_csv("test_job_123")
+    csv_str = manager.generate_csv("012301230123")
     reader = csv.reader(io.StringIO(csv_str))
     rows = list(reader)
 

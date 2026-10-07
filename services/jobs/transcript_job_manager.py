@@ -14,9 +14,10 @@ import logging
 import re
 import time
 import uuid
-from datetime import datetime, timezone
+from collections import OrderedDict
+from collections.abc import Coroutine
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
 
 from config.settings import settings
 from models.transcript_job import JobStatus, TranscriptJobProgress, TranscriptVideoItem
@@ -84,30 +85,144 @@ class JobLimitError(Exception):
         super().__init__(f"active job limit reached ({scope})")
 
 
+TERMINAL_STATUSES = frozenset({JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED})
+# Statuses that only make sense while a task is running in this process.
+RUNNING_STATUSES = frozenset({JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.COOLDOWN})
+_INTERRUPTED_MESSAGE = "Interrupted by a server restart. Resume to continue."
+
+
 class TranscriptJobManager:
-    """Manages long-running channel transcript background jobs with rate-limiting and resume."""
+    """Manages long-running channel transcript background jobs with rate-limiting and resume.
+
+    Lifecycle (single instance; the checkpoint file is the source of truth)::
+
+        queued -> running <-> cooldown -> completed | failed | cancelled
+                     |                         (terminal: kept JOB_RETENTION_DAYS, then deleted)
+                     +-> paused  (rate-limit pause, shutdown or crash; resumable)
+
+    Memory: ``_jobs`` holds jobs whose task is running (or that callers pinned);
+    finished jobs move to a small LRU (``JOB_MEMORY_CACHE_SIZE``) and are otherwise
+    read back from disk on demand, so completed transcripts are not held forever.
+    """
 
     def __init__(self, jobs_dir: Path | str | None = None) -> None:
         self._jobs: dict[str, TranscriptJobProgress] = {}
+        self._recent: OrderedDict[str, TranscriptJobProgress] = OrderedDict()
         self._tasks: dict[str, asyncio.Task] = {}
         self._lock = asyncio.Lock()
         self._jobs_dir: Path = Path(jobs_dir) if jobs_dir else settings.transcript_jobs_dir
         self._jobs_dir.mkdir(parents=True, exist_ok=True)
-        self._load_checkpoints()
 
-    def _load_checkpoints(self) -> None:
-        """Load existing persisted jobs from disk."""
-        try:
-            for file_path in self._jobs_dir.glob("*.json"):
-                try:
-                    data = json.loads(file_path.read_text(encoding="utf-8"))
-                    job = TranscriptJobProgress(**data)
-                    self._jobs[job.job_id] = job
-                    logger.debug("Loaded transcript job checkpoint %s from %s", job.job_id, file_path.name)
-                except Exception as exc:
-                    logger.warning("Failed to load transcript job checkpoint from %s: %s", file_path, exc)
-        except Exception as exc:
-            logger.warning("Failed to scan transcript jobs directory %s: %s", self._jobs_dir, exc)
+    # -- lifecycle ------------------------------------------------------------
+
+    def _iter_checkpoints(self):
+        """Yield ``(path, job)`` for every readable checkpoint (unreadable ones are logged)."""
+        for file_path in sorted(self._jobs_dir.glob("*.json")):
+            if self._job_path(file_path.stem) is None:
+                continue
+            try:
+                job = TranscriptJobProgress(**json.loads(file_path.read_text(encoding="utf-8")))
+            except Exception as exc:
+                logger.warning("Skipping unreadable transcript job checkpoint %s: %s", file_path.name, exc)
+                continue
+            yield file_path, job
+
+    def recover_interrupted_jobs(self) -> int:
+        """Mark jobs left queued/running/cooldown by a crash or kill as PAUSED (resumable).
+
+        Called once at startup, before any job is started in this process.
+        """
+        recovered = 0
+        for _, job in self._iter_checkpoints():
+            if job.job_id in self._tasks or job.status not in RUNNING_STATUSES:
+                continue
+            job.status = JobStatus.PAUSED
+            job.error = _INTERRUPTED_MESSAGE
+            job.cooldown_seconds_remaining = 0.0
+            for item in job.videos:
+                if item.status == "processing":
+                    item.status = "pending"
+            self._recalculate_counters(job)
+            self._save_checkpoint(job)
+            recovered += 1
+        if recovered:
+            logger.warning("Recovered %d interrupted transcript job(s) as paused", recovered)
+        return recovered
+
+    def cleanup_expired_jobs(self, now: datetime | None = None) -> list[str]:
+        """Delete checkpoints of jobs not updated for JOB_RETENTION_DAYS (never running jobs).
+
+        Safe to call from a worker thread: it only touches files. Returns the removed ids.
+        """
+        now = now or datetime.now(timezone.utc)
+        cutoff = now - timedelta(days=settings.job_retention_days)
+        removed: list[str] = []
+        for file_path in self._jobs_dir.glob("*.json"):
+            job_id = file_path.stem
+            if self._job_path(job_id) is None or job_id in self._jobs or job_id in self._tasks:
+                continue
+            try:
+                if datetime.fromtimestamp(file_path.stat().st_mtime, timezone.utc) >= cutoff:
+                    continue  # cheap pre-filter: recently written
+                job = TranscriptJobProgress(**json.loads(file_path.read_text(encoding="utf-8")))
+                updated = datetime.fromisoformat(job.updated_at.replace("Z", "+00:00"))
+                if updated.tzinfo is None:
+                    updated = updated.replace(tzinfo=timezone.utc)
+                if job.status in RUNNING_STATUSES or updated >= cutoff:
+                    continue
+                file_path.unlink()
+                removed.append(job_id)
+            except FileNotFoundError:
+                continue
+            except Exception as exc:
+                logger.warning("Could not evaluate job checkpoint %s for expiry: %s", file_path.name, exc)
+        for stale_tmp in self._jobs_dir.glob("*.tmp"):
+            try:
+                if datetime.fromtimestamp(stale_tmp.stat().st_mtime, timezone.utc) < now - timedelta(hours=1):
+                    stale_tmp.unlink()
+            except OSError:
+                continue
+        if removed:
+            logger.info(
+                "Deleted %d expired transcript job(s) (retention %d days)", len(removed), settings.job_retention_days,
+            )
+        return removed
+
+    async def run_retention_cleanup(self) -> int:
+        """Expire old jobs off the event loop, then drop them from the in-memory LRU."""
+        removed = await _to_thread(self.cleanup_expired_jobs)
+        for job_id in removed:
+            self._recent.pop(job_id, None)
+        return len(removed)
+
+    def _remember(self, job: TranscriptJobProgress) -> None:
+        """Keep a non-running job in the small LRU used for polling and downloads."""
+        if settings.job_memory_cache_size <= 0:
+            return
+        self._recent[job.job_id] = job
+        self._recent.move_to_end(job.job_id)
+        while len(self._recent) > settings.job_memory_cache_size:
+            self._recent.popitem(last=False)
+
+    def _launch(self, job: TranscriptJobProgress, coro: Coroutine) -> asyncio.Task:
+        """Run ``coro`` for ``job``; when it ends the job is released from the active set."""
+        self._recent.pop(job.job_id, None)
+        self._jobs[job.job_id] = job
+        task = asyncio.create_task(coro)
+        self._tasks[job.job_id] = task
+
+        def _release(done: asyncio.Task, job_id: str = job.job_id) -> None:
+            if self._tasks.get(job_id) is not done:
+                return  # superseded by a resume that started a new task
+            self._tasks.pop(job_id, None)
+            finished = self._jobs.pop(job_id, None)
+            if finished is not None:
+                self._remember(finished)
+            if not done.cancelled() and done.exception() is not None:
+                logger.error("Transcript job %s task crashed: %r", job_id, done.exception())
+
+        task.add_done_callback(_release)
+        return task
 
     def _job_path(self, job_id: str, suffix: str = ".json") -> Path | None:
         """Checkpoint path for a job id, or None when the id is not a valid opaque id.
@@ -167,39 +282,46 @@ class TranscriptJobManager:
     async def shutdown(self) -> None:
         """Stop running jobs on server shutdown, checkpointing them as PAUSED so they can be resumed."""
         running = {jid: t for jid, t in self._tasks.items() if not t.done()}
+        jobs = {jid: self._jobs.get(jid) for jid in running}
         for job_id, task in running.items():
-            job = self._jobs.get(job_id)
-            if job and job.status not in (JobStatus.COMPLETED, JobStatus.CANCELLED, JobStatus.FAILED):
+            job = jobs[job_id]
+            if job and job.status not in TERMINAL_STATUSES:
                 job.status = JobStatus.PAUSED
                 job.error = "Interrupted by server shutdown. Resume to continue."
             task.cancel()
         if running:
             await asyncio.gather(*running.values(), return_exceptions=True)
-        for job_id in running:
-            job = self._jobs.get(job_id)
-            if job and job.status == JobStatus.CANCELLED and job.error == "Interrupted by server shutdown. Resume to continue.":
-                job.status = JobStatus.PAUSED
-            if job:
-                self._save_checkpoint(job)
+        for job in jobs.values():
+            if job is None:
+                continue
+            if job.error == "Interrupted by server shutdown. Resume to continue.":
+                job.status = JobStatus.PAUSED  # the task's CancelledError handler may have set CANCELLED
+                for item in job.videos:
+                    if item.status == "processing":
+                        item.status = "pending"
+            self._save_checkpoint(job)
         self._tasks.clear()
         if running:
             logger.info("Paused %d running transcript job(s) for shutdown", len(running))
 
     def get_job(self, job_id: str) -> TranscriptJobProgress | None:
         job = self._jobs.get(job_id)
-        if not job:
-            # Job IDs are uuid4().hex[:12]; reject anything else before touching the filesystem
-            target = self._job_path(job_id)
-            if target is None:
-                return None
-            if target.exists():
-                try:
-                    data = json.loads(target.read_text(encoding="utf-8"))
-                    job = TranscriptJobProgress(**data)
-                    self._jobs[job_id] = job
-                except Exception as exc:
-                    logger.warning("Unreadable transcript job checkpoint %s: %s", target.name, exc)
-                    return None
+        if job is not None:
+            return job
+        job = self._recent.get(job_id)
+        if job is not None:
+            self._recent.move_to_end(job_id)
+            return job
+        # Job IDs are uuid4().hex[:12]; reject anything else before touching the filesystem
+        target = self._job_path(job_id)
+        if target is None or not target.exists():
+            return None
+        try:
+            job = TranscriptJobProgress(**json.loads(target.read_text(encoding="utf-8")))
+        except Exception as exc:
+            logger.warning("Unreadable transcript job checkpoint %s: %s", target.name, exc)
+            return None
+        self._remember(job)
         return job
 
     async def cancel_job(self, job_id: str) -> bool:
@@ -250,12 +372,13 @@ class TranscriptJobManager:
             published_before=published_before,
             output_language=output_language or "en",
             owner=owner,
+            max_videos=max_videos,
             videos=[],
         )
-        self._jobs[job_id] = progress
         self._save_checkpoint(progress)
 
-        task = asyncio.create_task(
+        self._launch(
+            progress,
             self._discover_and_run(
                 progress=progress,
                 clean_handle=clean_handle,
@@ -268,9 +391,8 @@ class TranscriptJobManager:
                 published_after=published_after,
                 published_before=published_before,
                 output_language=output_language or "en",
-            )
+            ),
         )
-        self._tasks[job_id] = task
 
         logger.info(
             "Queued transcript job %s for channel '%s' (concurrency=%d, pacing=%.1fs, out_lang=%s, pub_after=%s, pub_before=%s)",
@@ -291,7 +413,34 @@ class TranscriptJobManager:
                 logger.info("Job %s is already running.", job_id)
                 return job
 
-            pending_items = [v for v in job.videos if v.status in ("pending", "rate_limited", "temporary_error")]
+            if not job.videos and job.total_discovered == 0 and job.status not in (
+                JobStatus.COMPLETED, JobStatus.CANCELLED,
+            ):
+                # Discovery never finished (restart, crash or failure): run it again.
+                self._check_capacity(job.owner)
+                job.status = JobStatus.QUEUED
+                job.error = None
+                self._save_checkpoint(job)
+                self._launch(job, self._discover_and_run(
+                    progress=job,
+                    clean_handle=job.channel_handle.strip().lstrip("@"),
+                    max_videos=job.max_videos,
+                    min_duration=180,
+                    max_duration=1800,
+                    force_refresh=False,
+                    caption_concurrency=settings.transcript_max_concurrency,
+                    whisper_concurrency=settings.whisper_max_concurrency,
+                    published_after=job.published_after,
+                    published_before=job.published_before,
+                    output_language=job.output_language,
+                ))
+                logger.info("Restarted discovery for transcript job %s", job_id)
+                return job
+
+            # "processing" items were interrupted mid-flight (crash) and are retried too.
+            pending_items = [
+                v for v in job.videos if v.status in ("pending", "processing", "rate_limited", "temporary_error")
+            ]
             if not pending_items:
                 logger.info("Job %s has no pending or rate-limited items to resume.", job_id)
                 if job.status not in (JobStatus.COMPLETED, JobStatus.CANCELLED):
@@ -304,22 +453,20 @@ class TranscriptJobManager:
 
             # Reset statuses for resumption
             for v in pending_items:
-                if v.status == "rate_limited":
+                if v.status in ("rate_limited", "processing"):
                     v.status = "pending"
 
             job.status = JobStatus.RUNNING
+            job.error = None
             job.updated_at = datetime.now(timezone.utc).isoformat()
             self._save_checkpoint(job)
 
-            task = asyncio.create_task(
-                self._run_job(
-                    job,
-                    force_refresh=False,
-                    caption_concurrency=settings.transcript_max_concurrency,
-                    whisper_concurrency=settings.whisper_max_concurrency,
-                )
-            )
-            self._tasks[job_id] = task
+            self._launch(job, self._run_job(
+                job,
+                force_refresh=False,
+                caption_concurrency=settings.transcript_max_concurrency,
+                whisper_concurrency=settings.whisper_max_concurrency,
+            ))
             logger.info("Resumed transcript job %s (%d items remaining)", job_id, len(pending_items))
             return job
 
@@ -528,8 +675,8 @@ class TranscriptJobManager:
 
         if out_lang in ("en", "hi") and item.raw_transcript:
             try:
-                from services.translation.service import TranslationService
-                trans_svc = TranslationService()
+                from services.translation.service import get_translation_service
+                trans_svc = get_translation_service()
                 trans_res = await _to_thread(
                     trans_svc.translate,
                     video_id=item.video_id,

@@ -51,7 +51,10 @@ class YouTubeAudioExtractor:
 
         # Select lightweight audio formats (m4a preferred for Groq Whisper compatibility)
         ydl_opts = {
-            "format": "ba[ext=m4a]/ba/b",
+            # Speech needs little bandwidth: ~50-70 kbps keeps a 30-minute video near 16 MB,
+            # well under Groq's 25 MB upload limit (webm/opus and m4a are both accepted).
+            "format": "ba[abr<=72]/wa/ba",
+            "max_filesize": 25 * 1024 * 1024,
             "outtmpl": output_template,
             "quiet": True,
             "no_warnings": True,

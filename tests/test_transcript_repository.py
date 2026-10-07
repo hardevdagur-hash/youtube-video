@@ -44,7 +44,7 @@ class TestTranscriptRepository:
         cache = TTLCache(ttl_seconds=0.001)
         repo = TranscriptRepository(cache=cache)
         repo.save(TranscriptResult(video_id="test12345678"))
-        time.sleep(0.01)
+        time.sleep(0.05)  # > Windows monotonic clock resolution (~15.6 ms)
         assert repo.get("test12345678") is None
 
     def test_delete(self, sample_transcript):

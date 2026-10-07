@@ -65,9 +65,10 @@ def setup_logging() -> None:
     # Redact credentials from every log record before any handler sees it.
     install_secret_redaction()
     log_dir = settings.logs_dir
-    log_dir.mkdir(parents=True, exist_ok=True)
+    if settings.log_to_file:
+        log_dir.mkdir(parents=True, exist_ok=True)
 
-    config = {
+    config: dict[str, Any] = {
         "version": 1,
         "disable_existing_loggers": False,
         "formatters": {
@@ -128,6 +129,13 @@ def setup_logging() -> None:
             **{name: {"level": "WARNING"} for name in NOISY_HTTP_LOGGERS},
         },
     }
+    if not settings.log_to_file:
+        # Containers: stdout only (collected by the runtime); no files inside the image.
+        for name in ("file", "errors"):
+            config["handlers"].pop(name)
+        for logger_cfg in config["loggers"].values():
+            if "handlers" in logger_cfg:
+                logger_cfg["handlers"] = [h for h in logger_cfg["handlers"] if h == "console"]
     logging.config.dictConfig(config)
 
 

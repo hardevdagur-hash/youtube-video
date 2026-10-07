@@ -25,7 +25,7 @@ async def test_channel_job_transforms_to_simple_english(tmp_path):
     )
 
     job = TranscriptJobProgress(
-        job_id="job_se_1",
+        job_id="0bb0bb0bb0bb",
         channel_handle="physics_guru",
         channel_id="UC_phys",
         channel_title="Physics Guru",
@@ -94,7 +94,7 @@ async def test_channel_job_graceful_fallback_on_translation_error(tmp_path):
     )
 
     job = TranscriptJobProgress(
-        job_id="job_fallback",
+        job_id="0cc0cc0cc0cc",
         channel_handle="test_channel",
         channel_id="UC_fallback",
         channel_title="Fallback Channel",

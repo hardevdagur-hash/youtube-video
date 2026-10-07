@@ -90,7 +90,7 @@ class TestOriginalSpokenIntegrity:
         roman_text = "Main khta hoon maitriks jao. Woh kehte hain stremth kya hai?"
 
         job = TranscriptJobProgress(
-            job_id="test_job_hindi_orig",
+            job_id="0aa0aa0aa0aa",
             channel_handle="matrixacademysikar",
             channel_id="UC_matrix",
             channel_title="Matrix Academy",
