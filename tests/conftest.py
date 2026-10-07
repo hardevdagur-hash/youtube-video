@@ -4,6 +4,7 @@ import os
 import pytest
 
 os.environ.setdefault("YOUTUBE_API_KEY", "test_key_for_testing")
+os.environ.setdefault("JWT_SECRET_KEY", "test-only-jwt-secret-" + "x" * 32)
 
 
 # ---------------------------------------------------------------------------

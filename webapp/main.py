@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import functools
 import io
 import json
 import logging
@@ -47,6 +48,7 @@ from config.settings import is_youtube_api_key_valid, settings
 from infrastructure.logging import setup_logging
 from infrastructure.validation import RequestValidationMiddleware
 from models.api_response import error_response, success_response
+from services.csv_safety import safe_csv_row
 from security.web_auth import (
     SESSION_COOKIE,
     AuthMiddleware,
@@ -217,7 +219,16 @@ async def api_auth_logout():
 @app.get("/api/auth/me")
 async def api_auth_me(request: Request):
     principal = _principal(request)
-    return {"success": True, "user": {"username": principal.subject, "role": principal.role, "auth_method": principal.auth_method}}
+    return {
+        "success": True,
+        "user": {"username": principal.subject, "role": principal.role, "auth_method": principal.auth_method},
+        # Server-enforced caps, so the UI can bound its inputs instead of hitting 422s.
+        "limits": {
+            "max_videos_per_job": settings.max_videos_per_job,
+            "max_videos_sync": settings.max_videos_sync_export,
+            "max_active_jobs_per_user": settings.max_active_jobs_per_user,
+        },
+    }
 
 
 def _spa_index() -> FileResponse | HTMLResponse:
@@ -301,8 +312,35 @@ def _get_video_service():
 # --- Transcript endpoints ---
 
 class UnifiedTranscriptRequest(BaseModel):
-    video_url: str
-    output_language: str = "en"  # "en" (Simple English default) | "original" | "hi"
+    video_url: str = Field(min_length=1, max_length=2048)
+    # "en" (Simple English, default) | "hi" (Simple Hindi) | "original" (verbatim source; alias "original_spoken")
+    output_language: str = Field("en", max_length=20)
+
+
+def _transcript_error(rid: str, code: str | None) -> JSONResponse:
+    """Client-safe error body for the single-video transcript route (details stay in the log)."""
+    from services.public_errors import public_error
+
+    public, err = public_error(code)
+    return JSONResponse(
+        status_code=err.status_code,
+        content={
+            "success": False,
+            "error_code": public,
+            "message": err.message,
+            "retryable": err.retryable,
+            "trace_id": rid,
+        },
+        headers={"X-Request-ID": rid},
+    )
+
+
+def _normalize_output_mode(raw: str | None, default: str) -> str | None:
+    """Canonical output mode ('original' | 'en' | 'hi') or None when unsupported."""
+    mode = (raw or default).lower().strip()
+    if mode == "original_spoken":
+        mode = "original"
+    return mode if mode in ("original", "en", "hi") else None
 
 
 _shared_transcript_repo = None
@@ -323,6 +361,8 @@ def _get_unified_services():
 
 
 _OUTPUT_MODE_PATTERN = r"^(original|original_spoken|en|hi)$"
+# YYYY-MM-DD, optionally followed by an ISO 8601 time and offset
+_DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?(Z|[+-]\d{2}:\d{2})?)?$"
 _OUTPUT_MODE_LABELS = {"en": "Simple English", "hi": "Simple Hindi"}
 
 
@@ -377,31 +417,22 @@ async def api_transcript_unified(request: UnifiedTranscriptRequest):
         GroqTimeoutError,
         GroqTranscriptionError,
     )
-    from services.transcription.service import TranscriptService
     from services.transcription.validator import (
         TranscriptEmptyError,
         TranscriptValidationError,
     )
-    from services.translation.service import TranslationError, TranslationService
+    from services.translation.service import TranslationError
     from services.youtube.audio import AudioExtractionError
     from services.youtube.captions import CaptionsUnavailableError
 
     rid = uuid.uuid4().hex[:8]
     transcript_metrics.record_request_start()
-    out_lang = (request.output_language or "en").lower().strip()
-    if out_lang not in ("original", "en", "hi"):
-        return JSONResponse(
-            status_code=400,
-            content={
-                "success": False,
-                "error_code": "INVALID_REQUEST",
-                "message": f"Unsupported output_language '{request.output_language}'. Must be 'original', 'en', or 'hi'.",
-                "retryable": False,
-                "trace_id": rid,
-            },
-        )
+    out_lang = _normalize_output_mode(request.output_language, "en")
+    if out_lang is None:
+        logger.info("[%s] Rejected unsupported output_language=%r", rid, request.output_language[:20])
+        return _transcript_error(rid, "INVALID_REQUEST")
 
-    logger.info("[%s] Unified transcript request: url=%s, out_lang=%s", rid, request.video_url, out_lang)
+    logger.info("[%s] Unified transcript request: url=%r, out_lang=%s", rid, request.video_url[:200], out_lang)
 
     try:
         ts_service, trans_service = _get_unified_services()
@@ -470,8 +501,8 @@ async def api_transcript_unified(request: UnifiedTranscriptRequest):
             items = await _to_thread(video_svc.get_videos_batch, [video_id])
             if items:
                 title = items[0].get("snippet", {}).get("title")
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.info("[%s] Title lookup failed for %s: %s", rid, video_id, exc)
 
         transcript_metrics.record_final_result(success=True)
 
@@ -495,127 +526,48 @@ async def api_transcript_unified(request: UnifiedTranscriptRequest):
         }
 
     except YouTubeURLError as exc:
-        logger.warning("[%s] Invalid YouTube URL: %s", rid, exc)
+        logger.info("[%s] Invalid YouTube URL: %s", rid, exc)
         transcript_metrics.record_final_result(success=False)
-        return JSONResponse(
-            status_code=400,
-            content={
-                "success": False,
-                "error_code": "INVALID_YOUTUBE_URL",
-                "message": str(exc),
-                "retryable": False,
-                "trace_id": rid,
-            },
-        )
+        return _transcript_error(rid, "INVALID_YOUTUBE_URL")
     except CaptionsUnavailableError as exc:
-        logger.warning("[%s] Captions unavailable: %s", rid, exc)
+        logger.warning("[%s] Captions unavailable (%s): %s", rid, exc.error_code, exc)
         transcript_metrics.record_final_result(success=False)
-        return JSONResponse(
-            status_code=404,
-            content={
-                "success": False,
-                "error_code": exc.error_code,
-                "message": exc.message,
-                "retryable": False,
-                "trace_id": rid,
-            },
-        )
+        return _transcript_error(rid, exc.error_code)
     except AudioExtractionError as exc:
         logger.error("[%s] Audio extraction failed: %s", rid, exc)
         transcript_metrics.record_groq_fallback(success=False)
         transcript_metrics.record_final_result(success=False)
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "error_code": exc.error_code,
-                "message": "Audio could not be extracted from this YouTube video for speech-to-text.",
-                "retryable": True,
-                "trace_id": rid,
-            },
-        )
+        return _transcript_error(rid, "AUDIO_EXTRACTION_FAILED")
     except GroqAuthError as exc:
-        logger.error("[%s] Groq authentication failed: %s", rid, exc)
+        # Server misconfiguration (missing/invalid GROQ_API_KEY). Never 401: that status
+        # means "your session is invalid" to the browser client and would log the user out.
+        logger.error("[%s] Groq authentication failed; check GROQ_API_KEY: %s", rid, exc)
         transcript_metrics.record_groq_fallback(success=False)
         transcript_metrics.record_final_result(success=False)
-        return JSONResponse(
-            status_code=401,
-            content={
-                "success": False,
-                "error_code": exc.error_code,
-                "message": "Groq API key is missing or invalid. Please check your backend server configuration.",
-                "retryable": False,
-                "trace_id": rid,
-            },
-        )
-    except GroqRateLimitError as exc:
-        logger.warning("[%s] Groq rate limit hit: %s", rid, exc)
+        return _transcript_error(rid, "STT_UNAVAILABLE")
+    except (GroqRateLimitError, GroqTimeoutError) as exc:
+        logger.warning("[%s] Groq %s: %s", rid, exc.error_code, exc)
         transcript_metrics.record_groq_fallback(success=False)
         transcript_metrics.record_final_result(success=False)
-        return JSONResponse(
-            status_code=429,
-            content={
-                "success": False,
-                "error_code": exc.error_code,
-                "message": exc.message,
-                "retryable": True,
-                "trace_id": rid,
-            },
-        )
-    except GroqTimeoutError as exc:
-        logger.warning("[%s] Groq timeout: %s", rid, exc)
+        return _transcript_error(rid, exc.error_code)
+    except GroqTranscriptionError as exc:
+        logger.error("[%s] Speech-to-text failed (%s): %s", rid, exc.error_code, exc)
         transcript_metrics.record_groq_fallback(success=False)
         transcript_metrics.record_final_result(success=False)
-        return JSONResponse(
-            status_code=504,
-            content={
-                "success": False,
-                "error_code": exc.error_code,
-                "message": exc.message,
-                "retryable": True,
-                "trace_id": rid,
-            },
-        )
-    except (GroqTranscriptionError, TranslationError) as exc:
-        logger.error("[%s] STT/Translation failed: %s", rid, exc)
-        transcript_metrics.record_groq_fallback(success=False)
+        code = "AUDIO_EXTRACTION_FAILED" if exc.error_code == "AUDIO_EXTRACTION_FAILED" else "STT_FAILED"
+        return _transcript_error(rid, code)
+    except TranslationError as exc:
+        logger.error("[%s] Translation failed: %s", rid, exc)
         transcript_metrics.record_final_result(success=False)
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "error_code": getattr(exc, "error_code", "TRANSCRIPTION_FAILED"),
-                "message": "We could not generate a transcript or translation for this video.",
-                "retryable": getattr(exc, "retryable", True),
-                "trace_id": rid,
-            },
-        )
+        return _transcript_error(rid, "TRANSLATION_FAILED")
     except (TranscriptEmptyError, TranscriptValidationError) as exc:
-        logger.warning("[%s] Quality validation failed: %s", rid, exc)
+        logger.warning("[%s] Quality validation failed (%s): %s", rid, exc.error_code, exc)
         transcript_metrics.record_final_result(success=False)
-        return JSONResponse(
-            status_code=422,
-            content={
-                "success": False,
-                "error_code": exc.error_code,
-                "message": exc.message,
-                "retryable": False,
-                "trace_id": rid,
-            },
-        )
-    except Exception as exc:
-        logger.exception("[%s] Unexpected error in unified transcript route: %s", rid, exc)
+        return _transcript_error(rid, exc.error_code)
+    except Exception:
+        logger.exception("[%s] Unexpected error in unified transcript route", rid)
         transcript_metrics.record_final_result(success=False)
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "error_code": "TRANSCRIPTION_FAILED",
-                "message": "An unexpected error occurred while acquiring the transcript.",
-                "retryable": True,
-                "trace_id": rid,
-            },
-        )
+        return _transcript_error(rid, "TRANSCRIPTION_FAILED")
 
 
 @app.get("/api/transcript/metrics")
@@ -659,10 +611,44 @@ def _format_duration(total_seconds: int) -> str:
 # --- Channel Transcript endpoint ---
 
 
+_sync_channel_runs = 0
+
+
+def _limit_sync_channel_runs(applies=lambda kwargs: True):
+    """Reject (429) synchronous channel runs beyond MAX_CONCURRENT_SYNC_CHANNEL_RUNS.
+
+    Each such request fetches up to MAX_VIDEOS_SYNC_EXPORT transcripts inside one HTTP
+    request; bounding them protects YouTube quota, Groq credits and the single worker.
+    The counter is only touched on the event loop, so no lock is needed.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            global _sync_channel_runs
+            if not applies(kwargs):
+                return await func(*args, **kwargs)
+            if _sync_channel_runs >= settings.max_concurrent_sync_channel_runs:
+                logger.info("Synchronous channel run rejected: %d already running", _sync_channel_runs)
+                return error_response(
+                    message="The server is busy with other channel requests. Please retry shortly "
+                            "or use a background job.",
+                    status_code=429,
+                    error_code="SERVER_BUSY",
+                )
+            _sync_channel_runs += 1
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                _sync_channel_runs -= 1
+        return wrapper
+    return decorator
+
+
 @app.get("/api/channel/{handle}/transcripts")
+@_limit_sync_channel_runs()
 async def api_channel_transcripts(
     handle: str = PathParam(pattern=_HANDLE_PATTERN),
-    limit: int = Query(100, ge=1, le=settings.max_videos_sync_export),
+    limit: int = Query(settings.max_videos_sync_export, ge=1, le=settings.max_videos_sync_export),
     concurrency: int = Query(5, ge=1, le=_MAX_CONCURRENCY),
     allow_whisper: bool = True,
     output_language: str = Query("original", pattern=_OUTPUT_MODE_PATTERN),
@@ -989,9 +975,9 @@ class TranscriptJobCreateRequest(BaseModel):
     force_refresh: bool = False
     caption_concurrency: int = Field(1, ge=1, le=_MAX_CONCURRENCY)
     whisper_concurrency: int = Field(1, ge=1, le=_MAX_CONCURRENCY)
-    published_after: str | None = Field(None, max_length=40)
-    published_before: str | None = Field(None, max_length=40)
-    output_language: str = Field("en", max_length=20)
+    published_after: str | None = Field(None, max_length=40, pattern=_DATE_PATTERN)
+    published_before: str | None = Field(None, max_length=40, pattern=_DATE_PATTERN)
+    output_language: str = Field("en", pattern=_OUTPUT_MODE_PATTERN)
 
 
 @app.post("/api/channel/{handle}/transcript-job")
@@ -1000,13 +986,13 @@ async def api_start_channel_transcript_job(
     handle: str = PathParam(pattern=_HANDLE_PATTERN),
     max_videos: int = Query(0, ge=0, le=settings.max_videos_per_job),
     force_refresh: bool = False,
-    published_after: str | None = Query(None, max_length=40),
-    published_before: str | None = Query(None, max_length=40),
-    output_language: str = Query("en", max_length=20),
+    published_after: str | None = Query(None, max_length=40, pattern=_DATE_PATTERN),
+    published_before: str | None = Query(None, max_length=40, pattern=_DATE_PATTERN),
+    output_language: str = Query("en", pattern=_OUTPUT_MODE_PATTERN),
     req: TranscriptJobCreateRequest | None = None,
 ):
     """Launch asynchronous background job for channel transcripts."""
-    from services.jobs.transcript_job_manager import transcript_job_manager
+    from services.jobs.transcript_job_manager import JobLimitError, transcript_job_manager
     rid = uuid.uuid4().hex[:8]
     principal = _principal(request)
     try:
@@ -1018,7 +1004,7 @@ async def api_start_channel_transcript_job(
         eff_whisper_conc = req.whisper_concurrency if req else 1
         eff_pub_after = req.published_after if req and req.published_after else published_after
         eff_pub_before = req.published_before if req and req.published_before else published_before
-        eff_out_lang = (req.output_language if req and req.output_language else output_language) or "en"
+        eff_out_lang = _normalize_output_mode(req.output_language if req else output_language, "en") or "en"
 
         progress = await transcript_job_manager.start_channel_job(
             channel_handle=handle,
@@ -1035,6 +1021,14 @@ async def api_start_channel_transcript_job(
             data=progress.model_dump(),
             message=f"Transcript job {progress.job_id} queued for {progress.channel_title or handle}",
         )
+    except JobLimitError as exc:
+        logger.info("[%s] Job limit reached (%s) for %s", rid, exc.scope, principal.subject if principal else "-")
+        message = (
+            "You already have the maximum number of running jobs. Wait for one to finish or cancel it."
+            if exc.scope == "user"
+            else "The server is busy with other transcript jobs. Please try again shortly."
+        )
+        return error_response(message=message, status_code=429, error_code="JOB_LIMIT_REACHED")
     except Exception as exc:
         logger.exception("[%s] Failed to start channel transcript job: %s", rid, exc)
         return error_response(message=f"Failed to start job (trace {rid}).", status_code=500)
@@ -1066,11 +1060,18 @@ async def api_cancel_transcript_job(request: Request, job_id: str = PathParam(pa
 @app.post("/api/transcript/jobs/{job_id}/resume")
 async def api_resume_transcript_job(request: Request, job_id: str = PathParam(pattern=_JOB_ID_PATTERN)):
     """Resume a pending, paused, or rate-limited background job."""
-    from services.jobs.transcript_job_manager import transcript_job_manager
+    from services.jobs.transcript_job_manager import JobLimitError, transcript_job_manager
     existing = transcript_job_manager.get_job(job_id)
     if not existing or not _can_access_transcript_job(request, existing):
         return error_response(message=f"Job '{job_id}' not found", status_code=404)
-    job = await transcript_job_manager.resume_job(job_id)
+    try:
+        job = await transcript_job_manager.resume_job(job_id)
+    except JobLimitError:
+        return error_response(
+            message="Too many running jobs to resume this one now. Please try again shortly.",
+            status_code=429,
+            error_code="JOB_LIMIT_REACHED",
+        )
     if not job:
         return error_response(message=f"Job '{job_id}' not found", status_code=404)
     return success_response(data=job.model_dump(), message=f"Job '{job_id}' resumed")
@@ -1117,17 +1118,6 @@ class TranscriptExportRequest(BaseModel):
     )
     output_language: str = Field("original", pattern=_OUTPUT_MODE_PATTERN)
     include_audit_columns: bool = False
-
-
-def _csv_escape(text: str | None) -> str:
-    """Escape a string for CSV, handling commas, quotes, and newlines."""
-    if text is None:
-        return ""
-    s = str(text)
-    if "," in s or '"' in s or "\n" in s or "\r" in s:
-        s = s.replace('"', '""')
-        s = f'"{s}"'
-    return s
 
 
 def _build_csv_rows(videos: list[dict], output_language: str = "original", include_audit_columns: bool = False) -> str:
@@ -1226,7 +1216,7 @@ def _build_csv_rows(videos: list[dict], output_language: str = "original", inclu
         ]
         if include_audit_columns:
             row.extend([out_mode, source_lang, source_code])
-        writer.writerow(row)
+        writer.writerow(safe_csv_row(row))
 
     return output.getvalue()
 
@@ -1245,6 +1235,7 @@ def _resolve_video_id(url: str) -> str | None:
 
 
 @app.post("/api/transcript/export")
+@_limit_sync_channel_runs(applies=lambda kwargs: bool(kwargs["req"].channel_handle))
 async def api_transcript_csv_export(req: TranscriptExportRequest):
     """Export transcripts as CSV for a single video or entire channel.
 

@@ -7,6 +7,8 @@ without changing service-layer code.
 
 import json
 import logging
+import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,9 @@ from models.transcript import TranscriptResult
 from utils.cache import TTLCache
 
 logger = logging.getLogger(__name__)
+
+_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_LANGUAGE_RE = re.compile(r"^[A-Za-z0-9_:-]{1,32}$")
 
 
 class TranscriptRepository:
@@ -35,6 +40,35 @@ class TranscriptRepository:
 
         if self._persist_dir:
             self._persist_dir.mkdir(parents=True, exist_ok=True)
+            self._persist_root = self._persist_dir.resolve()
+
+    def _file_for(self, video_id: str, language: str | None = None) -> Path | None:
+        """Cache file for a video (and optional language), or None if the key is unsafe.
+
+        Keys come from YouTube and request input, so they are validated and the final
+        path must stay inside the cache directory (no traversal via ``..`` or separators).
+        """
+        if not self._persist_dir or not isinstance(video_id, str) or not _VIDEO_ID_RE.match(video_id):
+            if self._persist_dir:
+                logger.warning("Refusing transcript cache path for invalid video id %r", str(video_id)[:32])
+            return None
+        name = video_id
+        if language is not None:
+            if not _LANGUAGE_RE.match(language):
+                logger.warning("Refusing transcript cache path for invalid language %r", language[:32])
+                return None
+            name = f"{video_id}_{language.replace(':', '_')}"
+        path = (self._persist_dir / f"{name}.json").resolve()
+        if not path.is_relative_to(self._persist_root):
+            logger.warning("Refusing transcript cache path outside %s", self._persist_root)
+            return None
+        return path
+
+    @staticmethod
+    def _write_atomic(path: Path, data: dict[str, Any]) -> None:
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
 
     def get(self, video_id: str) -> TranscriptResult | None:
         """Retrieve a cached transcript by video ID.
@@ -57,8 +91,8 @@ class TranscriptRepository:
                 self._cache.delete(cache_key)
 
         # Check file persistence
-        if self._persist_dir:
-            file_path = self._persist_dir / f"{video_id}.json"
+        file_path = self._file_for(video_id)
+        if file_path is not None:
             if file_path.exists():
                 try:
                     data = json.loads(file_path.read_text(encoding="utf-8"))
@@ -82,13 +116,10 @@ class TranscriptRepository:
 
         self._cache.set(cache_key, data)
 
-        if self._persist_dir:
-            file_path = self._persist_dir / f"{transcript.video_id}.json"
+        file_path = self._file_for(transcript.video_id)
+        if file_path is not None:
             try:
-                file_path.write_text(
-                    json.dumps(data, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
+                self._write_atomic(file_path, data)
                 logger.debug("Transcript persisted for %s", transcript.video_id)
             except Exception as exc:
                 logger.warning("Failed to persist transcript for %s: %s", transcript.video_id, exc)
@@ -102,8 +133,8 @@ class TranscriptRepository:
         cache_key = f"transcript:{video_id}"
         self._cache.delete(cache_key)
 
-        if self._persist_dir:
-            file_path = self._persist_dir / f"{video_id}.json"
+        file_path = self._file_for(video_id)
+        if file_path is not None:
             try:
                 if file_path.exists():
                     file_path.unlink()
@@ -131,9 +162,8 @@ class TranscriptRepository:
                 self._cache.delete(cache_key)
 
         # Check disk persistence
-        if self._persist_dir:
-            safe_lang = language.replace(":", "_")
-            file_path = self._persist_dir / f"{video_id}_{safe_lang}.json"
+        file_path = self._file_for(video_id, language)
+        if file_path is not None:
             if file_path.exists():
                 try:
                     data = json.loads(file_path.read_text(encoding="utf-8"))
@@ -157,14 +187,10 @@ class TranscriptRepository:
         data = transcript.model_dump()
         self._cache.set(cache_key, data)
 
-        if self._persist_dir:
-            safe_lang = language.replace(":", "_")
-            file_path = self._persist_dir / f"{transcript.video_id}_{safe_lang}.json"
+        file_path = self._file_for(transcript.video_id, language)
+        if file_path is not None:
             try:
-                file_path.write_text(
-                    json.dumps(data, indent=2, ensure_ascii=False),
-                    encoding="utf-8",
-                )
+                self._write_atomic(file_path, data)
                 logger.debug("Translation persisted for %s/%s", transcript.video_id, language)
             except Exception as exc:
                 logger.warning("Failed to persist translation for %s/%s: %s",

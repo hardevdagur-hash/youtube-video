@@ -16,11 +16,21 @@ export interface AuthUser {
   role: 'admin' | 'user';
 }
 
+/** Server-enforced caps reported by /api/auth/me (defaults match the backend defaults). */
+export interface ServerLimits {
+  maxVideosPerJob: number;
+  maxVideosSync: number;
+  maxActiveJobsPerUser: number;
+}
+
+export const DEFAULT_LIMITS: ServerLimits = { maxVideosPerJob: 100, maxVideosSync: 25, maxActiveJobsPerUser: 2 };
+
 type AuthStatus = 'loading' | 'authenticated' | 'anonymous';
 
 interface AuthContextValue {
   status: AuthStatus;
   user: AuthUser | null;
+  limits: ServerLimits;
   login: (username: string, password: string) => Promise<string | null>;
   logout: () => Promise<void>;
 }
@@ -50,19 +60,29 @@ export function installAuthInterceptor(): void {
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('loading');
   const [user, setUser] = useState<AuthUser | null>(null);
+  const [limits, setLimits] = useState<ServerLimits>(DEFAULT_LIMITS);
+
+  /** Load the signed-in principal and the server limits; returns false when not signed in. */
+  const loadMe = useCallback(async (): Promise<boolean> => {
+    const resp = await fetch(`${API_BASE}/api/auth/me`, { credentials: 'same-origin' });
+    if (!resp.ok) return false;
+    const data = await resp.json();
+    setUser({ username: data.user.username, role: data.user.role });
+    if (data.limits) {
+      setLimits({
+        maxVideosPerJob: Number(data.limits.max_videos_per_job) || DEFAULT_LIMITS.maxVideosPerJob,
+        maxVideosSync: Number(data.limits.max_videos_sync) || DEFAULT_LIMITS.maxVideosSync,
+        maxActiveJobsPerUser: Number(data.limits.max_active_jobs_per_user) || DEFAULT_LIMITS.maxActiveJobsPerUser,
+      });
+    }
+    return true;
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`${API_BASE}/api/auth/me`, { credentials: 'same-origin' })
-      .then(async (resp) => {
-        if (cancelled) return;
-        if (resp.ok) {
-          const data = await resp.json();
-          setUser({ username: data.user.username, role: data.user.role });
-          setStatus('authenticated');
-        } else {
-          setStatus('anonymous');
-        }
+    loadMe()
+      .then((ok) => {
+        if (!cancelled) setStatus(ok ? 'authenticated' : 'anonymous');
       })
       .catch(() => {
         if (!cancelled) setStatus('anonymous');
@@ -77,7 +97,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
     };
-  }, []);
+  }, [loadMe]);
 
   const login = useCallback(async (username: string, password: string): Promise<string | null> => {
     try {
@@ -93,11 +113,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       setUser({ username: data.user.username, role: data.user.role });
       setStatus('authenticated');
+      // Limits are not part of the login response; on failure the defaults stay in place.
+      loadMe().catch(() => undefined);
       return null;
     } catch {
       return 'Cannot reach the server.';
     }
-  }, []);
+  }, [loadMe]);
 
   const logout = useCallback(async () => {
     try {
@@ -108,12 +130,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  return <AuthContext.Provider value={{ status, user, login, logout }}>{children}</AuthContext.Provider>;
+  return <AuthContext.Provider value={{ status, user, limits, login, logout }}>{children}</AuthContext.Provider>;
 }
 
 const SIGNED_OUT: AuthContextValue = {
   status: 'anonymous',
   user: null,
+  limits: DEFAULT_LIMITS,
   login: async () => 'Authentication is not available.',
   logout: async () => {},
 };

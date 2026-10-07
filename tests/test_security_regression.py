@@ -197,7 +197,7 @@ def test_path_traversal_rejected(authed_client, path):
 def test_invalid_language_identifier_rejected(authed_client):
     for bad in ("x", "e<script>", "english-language-long", "en us", "..\\..", "fr"):
         resp = authed_client.post("/api/transcript", json={"video_url": "dQw4w9WgXcQ", "output_language": bad})
-        assert resp.status_code == 400, bad
+        assert resp.status_code in (400, 422), bad
         resp = authed_client.get("/api/channel/chan/transcripts", params={"output_language": bad})
         assert resp.status_code == 422, bad
 

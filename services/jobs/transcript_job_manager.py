@@ -21,6 +21,8 @@ from typing import Any
 from config.settings import settings
 from models.transcript_job import JobStatus, TranscriptJobProgress, TranscriptVideoItem
 from services.duration_filter import evaluate_duration, parse_iso_duration
+from services.csv_safety import safe_csv_row
+from services.public_errors import public_message
 from services.transcript_limiter import transcript_limiter
 
 logger = logging.getLogger(__name__)
@@ -74,6 +76,14 @@ def parse_published_at(pub_str: str | None) -> datetime | None:
         return None
 
 
+class JobLimitError(Exception):
+    """Raised when starting or resuming a job would exceed the active-job limits."""
+
+    def __init__(self, scope: str) -> None:
+        self.scope = scope  # "user" | "server"
+        super().__init__(f"active job limit reached ({scope})")
+
+
 class TranscriptJobManager:
     """Manages long-running channel transcript background jobs with rate-limiting and resume."""
 
@@ -99,13 +109,28 @@ class TranscriptJobManager:
         except Exception as exc:
             logger.warning("Failed to scan transcript jobs directory %s: %s", self._jobs_dir, exc)
 
+    def _job_path(self, job_id: str, suffix: str = ".json") -> Path | None:
+        """Checkpoint path for a job id, or None when the id is not a valid opaque id.
+
+        Job ids are ``uuid4().hex[:12]``; anything else (traversal sequences, separators,
+        encoded input) is rejected, and the resolved path must stay inside the jobs dir.
+        """
+        if not isinstance(job_id, str) or not _JOB_ID_RE.match(job_id):
+            return None
+        root = self._jobs_dir.resolve()
+        path = (root / f"{job_id}{suffix}").resolve()
+        return path if path.is_relative_to(root) else None
+
     def _save_checkpoint(self, job: TranscriptJobProgress) -> None:
         """Persist current job progress to disk atomically."""
         try:
-            target = self._jobs_dir / f"{job.job_id}.json"
-            job.checkpoint_file = str(target)
+            target = self._job_path(job.job_id)
+            temp = self._job_path(job.job_id, ".tmp")
+            if target is None or temp is None:
+                logger.error("Refusing to checkpoint job with invalid id %r", str(job.job_id)[:32])
+                return
+            job.checkpoint_file = target.name
             job.updated_at = datetime.now(timezone.utc).isoformat()
-            temp = self._jobs_dir / f"{job.job_id}.tmp"
             temp.write_text(job.model_dump_json(indent=2), encoding="utf-8")
             temp.replace(target)
         except Exception as exc:
@@ -124,6 +149,20 @@ class TranscriptJobManager:
 
     def active_job_count(self) -> int:
         return sum(1 for task in self._tasks.values() if not task.done())
+
+    def _check_capacity(self, owner: str | None) -> None:
+        """Enforce MAX_ACTIVE_JOBS (server) and MAX_ACTIVE_JOBS_PER_USER before launching a task.
+
+        Callers must not await between this check and registering the new task, so the
+        check-then-start sequence is atomic on the event loop.
+        """
+        active = [jid for jid, task in self._tasks.items() if not task.done()]
+        if len(active) >= settings.max_active_jobs:
+            raise JobLimitError("server")
+        if owner is not None:
+            mine = sum(1 for jid in active if (job := self._jobs.get(jid)) is not None and job.owner == owner)
+            if mine >= settings.max_active_jobs_per_user:
+                raise JobLimitError("user")
 
     async def shutdown(self) -> None:
         """Stop running jobs on server shutdown, checkpointing them as PAUSED so they can be resumed."""
@@ -150,17 +189,17 @@ class TranscriptJobManager:
         job = self._jobs.get(job_id)
         if not job:
             # Job IDs are uuid4().hex[:12]; reject anything else before touching the filesystem
-            if not _JOB_ID_RE.match(job_id or ""):
+            target = self._job_path(job_id)
+            if target is None:
                 return None
-            # Try disk
-            target = self._jobs_dir / f"{job_id}.json"
             if target.exists():
                 try:
                     data = json.loads(target.read_text(encoding="utf-8"))
                     job = TranscriptJobProgress(**data)
                     self._jobs[job_id] = job
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.warning("Unreadable transcript job checkpoint %s: %s", target.name, exc)
+                    return None
         return job
 
     async def cancel_job(self, job_id: str) -> bool:
@@ -191,6 +230,7 @@ class TranscriptJobManager:
         owner: str | None = None,
     ) -> TranscriptJobProgress:
         """Initialize and launch background transcript job for a YouTube channel."""
+        self._check_capacity(owner)
         clean_handle = channel_handle.strip().lstrip("@")
         job_id = uuid.uuid4().hex[:12]
 
@@ -259,6 +299,8 @@ class TranscriptJobManager:
                     job.completed_at = datetime.now(timezone.utc).isoformat()
                     self._save_checkpoint(job)
                 return job
+
+            self._check_capacity(job.owner)
 
             # Reset statuses for resumption
             for v in pending_items:
@@ -444,7 +486,8 @@ class TranscriptJobManager:
         except Exception as exc:
             logger.exception("Job %s encountered error during discovery: %s", progress.job_id, exc)
             progress.status = JobStatus.FAILED
-            progress.error = str(exc)
+            # Client-visible; the exception detail stays in the server log.
+            progress.error = "Channel discovery failed. Check the channel handle and try again."
             progress.updated_at = datetime.now(timezone.utc).isoformat()
             self._save_checkpoint(progress)
 
@@ -681,10 +724,10 @@ class TranscriptJobManager:
                     break
 
                 except Exception as exc:
-                    logger.warning("Exception processing video %s: %s", item.video_id, exc)
+                    logger.warning("[Job %s] Exception processing video %s: %s", job.job_id, item.video_id, exc)
                     item.status = "failed"
                     item.error_code = "UNEXPECTED_ERROR"
-                    item.error_message = str(exc)
+                    item.error_message = public_message("UNEXPECTED_ERROR")
                     item.completed_at = datetime.now(timezone.utc).isoformat()
                     break
 
@@ -773,7 +816,7 @@ class TranscriptJobManager:
                     v.source_language or row_lang,
                     v.source_language_code or ("hi" if row_lang == "Hindi" else "en"),
                 ])
-            writer.writerow(row)
+            writer.writerow(safe_csv_row(row))
 
         return output.getvalue()
 

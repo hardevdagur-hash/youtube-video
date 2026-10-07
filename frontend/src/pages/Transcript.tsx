@@ -9,6 +9,7 @@ import {
 import { Container, Badge, Card } from '../components/ui';
 import VideoUrlInput from '../components/transcript/VideoUrlInput';
 import { transcriptService } from '../services/TranscriptService';
+import { useAuth } from '../auth/AuthContext';
 import type {
   ChannelVideoTranscriptSimple,
   TranscriptJobProgressData,
@@ -94,12 +95,16 @@ export default function Transcript() {
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const [maxVideos, setMaxVideos] = useState(100);
+  const { limits } = useAuth();
+  const [maxVideos, setMaxVideos] = useState(limits.maxVideosPerJob);
   const [channelVideos, setChannelVideos] = useState<ChannelVideoTranscriptSimple[] | null>(null);
   const [channelLoading, setChannelLoading] = useState(false);
   const [channelError, setChannelError] = useState<string | null>(null);
   const [activeJob, setActiveJob] = useState<TranscriptJobProgressData | null>(null);
   const [useBackgroundMode, setUseBackgroundMode] = useState(true);
+  // Server-enforced cap for the selected mode (background jobs allow more than synchronous runs)
+  const videoCap = useBackgroundMode ? limits.maxVideosPerJob : limits.maxVideosSync;
+  const effectiveMaxVideos = Math.min(maxVideos, videoCap);
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
   const channelInputRef = useRef<HTMLInputElement>(null);
 
@@ -407,7 +412,7 @@ export default function Transcript() {
       if (useBackgroundMode) {
         const job = await transcriptService.startTranscriptJob(
           handle,
-          maxVideos,
+          effectiveMaxVideos,
           false,
           publishedAfter || null,
           publishedBefore || null,
@@ -418,19 +423,19 @@ export default function Transcript() {
           setChannelVideos(job.videos);
         }
       } else {
-        const videos = await transcriptService.fetchChannelTranscriptsSimple(handle, maxVideos, 5, true, channelOutputLang);
+        const videos = await transcriptService.fetchChannelTranscriptsSimple(handle, effectiveMaxVideos, 5, true, channelOutputLang);
         setChannelVideos(videos);
         setChannelLoading(false);
       }
     } catch (err) {
       setChannelLoading(false);
       if (err instanceof TypeError) {
-        setChannelError('Backend unavailable. Ensure the API server is running on port 8000.');
+        setChannelError('Cannot reach the server. Check your connection and try again.');
       } else {
         setChannelError(err instanceof Error ? err.message : String(err));
       }
     }
-  }, [maxVideos, useBackgroundMode, publishedAfter, publishedBefore, channelOutputLang]);
+  }, [effectiveMaxVideos, useBackgroundMode, publishedAfter, publishedBefore, channelOutputLang]);
 
   const handleCancelJob = async () => {
     if (!activeJob) return;
@@ -476,13 +481,14 @@ export default function Transcript() {
         return;
       }
 
+      // Channel exports follow the channel language selector; single videos follow the viewer mode.
       const body: Record<string, unknown> = {
         format: 'csv',
-        output_language: selectedMode,
+        output_language: channelHandle ? channelOutputLang : selectedMode,
       };
       if (channelHandle) {
         body.channel_handle = channelHandle;
-        body.max_videos = maxVideos;
+        body.max_videos = Math.min(maxVideos, limits.maxVideosSync);
       } else if (processingVideoId || validatedVideoId) {
         const vid = processingVideoId || validatedVideoId;
         body.video_url = `https://youtube.com/watch?v=${vid}`;
@@ -516,7 +522,7 @@ export default function Transcript() {
     } finally {
       setCsvExporting(false);
     }
-  }, [processingVideoId, validatedVideoId, activeJob, maxVideos]);
+  }, [processingVideoId, validatedVideoId, activeJob, maxVideos, selectedMode, channelOutputLang, limits.maxVideosSync]);
 
   // Statistics calculation
   const totalEligible = channelVideos?.length || 0;
@@ -638,13 +644,13 @@ export default function Transcript() {
                         <input
                           type="number"
                           value={maxVideos}
-                          onChange={(e) => setMaxVideos(Math.max(1, Math.min(1000, parseInt(e.target.value) || 100)))}
+                          onChange={(e) => setMaxVideos(Math.max(1, Math.min(videoCap, parseInt(e.target.value) || videoCap)))}
                           min={1}
-                          max={1000}
-                          placeholder="Enter number of videos (1–1000)"
+                          max={videoCap}
+                          placeholder={`Enter number of videos (1–${videoCap})`}
                           className="w-full px-4 py-2.5 rounded-xl border-2 border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm transition-all-200 outline-none focus:border-violet-400 focus:ring-4 focus:ring-violet-100 dark:focus:ring-violet-900/30"
                         />
-                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400">1–1000</span>
+                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400">1–{videoCap}</span>
                       </div>
                     </div>
 

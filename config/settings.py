@@ -128,8 +128,13 @@ class Settings:
     # Comma-separated browser origins allowed for CORS. Empty = same-origin only.
     cors_origins: str = _get_env("CORS_ORIGINS", "")
     # Abuse limits on job size (each video can cost YouTube quota and STT credits)
-    max_videos_per_job: int = int(_get_env("MAX_VIDEOS_PER_JOB", "1000"))
-    max_videos_sync_export: int = int(_get_env("MAX_VIDEOS_SYNC_EXPORT", "1000"))
+    max_videos_per_job: int = int(_get_env("MAX_VIDEOS_PER_JOB", "100"))
+    # Synchronous channel requests hold an HTTP connection for the whole run: keep them small.
+    max_videos_sync_export: int = int(_get_env("MAX_VIDEOS_SYNC_EXPORT", "25"))
+    max_concurrent_sync_channel_runs: int = int(_get_env("MAX_CONCURRENT_SYNC_CHANNEL_RUNS", "2"))
+    # Running background jobs (each holds YouTube/Groq capacity for its whole run)
+    max_active_jobs: int = int(_get_env("MAX_ACTIVE_JOBS", "4"))
+    max_active_jobs_per_user: int = int(_get_env("MAX_ACTIVE_JOBS_PER_USER", "2"))
 
     def __init__(self) -> None:
         """Create directories on initialization."""
