@@ -1,10 +1,10 @@
 import { motion, AnimatePresence } from 'framer-motion';
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import {
   Youtube, Loader2, ChevronDown, ChevronRight,
   Users, Hash, XCircle, Download, RotateCcw,
   CheckCircle2, AlertCircle, ExternalLink, StopCircle, RefreshCw,
-  Copy, Check, Sparkles, Globe, FileText, Languages, Cpu, Clock, Database,
+  Copy, Check, Sparkles, Globe, FileText, Languages, Cpu, Clock, Database, Calendar,
 } from 'lucide-react';
 import { Container, Badge, Card } from '../components/ui';
 import VideoUrlInput from '../components/transcript/VideoUrlInput';
@@ -16,6 +16,7 @@ import type {
   OutputLanguage,
   PipelineStage,
   UnifiedTranscriptResponse,
+  UnifiedTranscriptSegment,
 } from '../types';
 
 function cleanHandle(input: string): string {
@@ -32,9 +33,55 @@ export default function Transcript() {
   const [currentVideoUrl, setCurrentVideoUrl] = useState<string>('');
   const [videoResult, setVideoResult] = useState<TranscriptSimpleResponse | null>(null);
   const [unifiedResult, setUnifiedResult] = useState<UnifiedTranscriptResponse | null>(null);
-  const [activeLang, setActiveLang] = useState<OutputLanguage>('original');
+
+  // Single source of truth for selected transcript display mode
+  const [selectedMode, setSelectedMode] = useState<OutputLanguage>('en');
+  const activeLang = selectedMode;
+
+  // Canonical Original Spoken State (IMMUTABLE once fetched for current video)
+  const [canonicalData, setCanonicalData] = useState<{
+    transcript: string;
+    segments: UnifiedTranscriptSegment[];
+    sourceLanguage: string;
+    provider: string;
+    duration_seconds?: number | null;
+    confidence?: number;
+    title?: string | null;
+  } | null>(null);
+
+  // Multi-Slot Derived Transformation Cache (Keyed by target language: 'en' | 'hi')
+  const [transformations, setTransformations] = useState<{
+    en?: { transcript: string; segments: UnifiedTranscriptSegment[] };
+    hi?: { transcript: string; segments: UnifiedTranscriptSegment[] };
+  }>({});
+
+  // Sequence ref for in-flight translation race condition protection
+  const requestSeqRef = useRef<number>(0);
+
   const [isTranslating, setIsTranslating] = useState(false);
   const [viewMode, setViewMode] = useState<'text' | 'segments'>('text');
+
+  // Single Source of Truth for displayed transcript text
+  const displayedTranscript = useMemo(() => {
+    if (selectedMode === 'original') {
+      return canonicalData?.transcript || '';
+    }
+    return transformations[selectedMode]?.transcript || '';
+  }, [selectedMode, canonicalData, transformations]);
+
+  // Single Source of Truth for displayed timestamped segments
+  const displayedSegments = useMemo(() => {
+    if (selectedMode === 'original') {
+      return canonicalData?.segments || [];
+    }
+    return transformations[selectedMode]?.segments || [];
+  }, [selectedMode, canonicalData, transformations]);
+
+  // Pure dynamically derived word count for active display mode
+  const displayedWordCount = useMemo(() => {
+    if (!displayedTranscript) return 0;
+    return displayedTranscript.trim().split(/\s+/).filter(Boolean).length;
+  }, [displayedTranscript]);
   const [pipelineStage, setPipelineStage] = useState<PipelineStage>('IDLE');
   const [stageMessage, setStageMessage] = useState<string>('');
   const [structuredError, setStructuredError] = useState<{
@@ -56,8 +103,46 @@ export default function Transcript() {
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
   const channelInputRef = useRef<HTMLInputElement>(null);
 
+  // Channel scraping date filter & Simple English output options
+  const [channelDatePreset, setChannelDatePreset] = useState<'all' | '30d' | '3m' | '6m' | '1y' | 'custom'>('all');
+  const [publishedAfter, setPublishedAfter] = useState<string>('');
+  const [publishedBefore, setPublishedBefore] = useState<string>('');
+  const [channelOutputLang, setChannelOutputLang] = useState<'en' | 'original' | 'hi'>('en');
+  const [showRawForIdx, setShowRawForIdx] = useState<Record<number, boolean>>({});
+
   const [csvExporting, setCsvExporting] = useState(false);
   const [csvExportStatus, setCsvExportStatus] = useState<string | null>(null);
+
+  const handleDatePresetChange = (preset: 'all' | '30d' | '3m' | '6m' | '1y' | 'custom') => {
+    setChannelDatePreset(preset);
+    const now = new Date();
+    const fmt = (d: Date) => d.toISOString().split('T')[0];
+
+    if (preset === 'all') {
+      setPublishedAfter('');
+      setPublishedBefore('');
+    } else if (preset === '30d') {
+      const past = new Date();
+      past.setDate(now.getDate() - 30);
+      setPublishedAfter(fmt(past));
+      setPublishedBefore(fmt(now));
+    } else if (preset === '3m') {
+      const past = new Date();
+      past.setMonth(now.getMonth() - 3);
+      setPublishedAfter(fmt(past));
+      setPublishedBefore(fmt(now));
+    } else if (preset === '6m') {
+      const past = new Date();
+      past.setMonth(now.getMonth() - 6);
+      setPublishedAfter(fmt(past));
+      setPublishedBefore(fmt(now));
+    } else if (preset === '1y') {
+      const past = new Date();
+      past.setFullYear(now.getFullYear() - 1);
+      setPublishedAfter(fmt(past));
+      setPublishedBefore(fmt(now));
+    }
+  };
 
   const handleValidUrl = (videoId: string, normalizedUrl: string) => {
     setValidatedVideoId(videoId);
@@ -65,18 +150,22 @@ export default function Transcript() {
   };
 
   const fetchSingleTranscript = useCallback(
-    async (videoId: string, rawUrl?: string, targetLang: OutputLanguage = 'original') => {
+    async (videoId: string, rawUrl?: string, targetLang: OutputLanguage = 'en') => {
       const url = rawUrl || (currentVideoUrl ? currentVideoUrl : `https://www.youtube.com/watch?v=${videoId}`);
       setCurrentVideoUrl(url);
       setProcessingVideoId(videoId);
-      setActiveLang(targetLang);
+      setSelectedMode(targetLang);
       setChannelVideos(null);
       setActiveJob(null);
       setVideoResult(null);
       setUnifiedResult(null);
+      setCanonicalData(null);
+      setTransformations({});
       setStructuredError(null);
       setError(null);
       setLoading(true);
+
+      const currentSeq = ++requestSeqRef.current;
 
       setPipelineStage('VALIDATING');
       setStageMessage('Validating YouTube video URL & identifier...');
@@ -88,18 +177,18 @@ export default function Transcript() {
 
       const t2 = setTimeout(() => {
         setPipelineStage('FETCHING_CAPTIONS');
-        setStageMessage('Checking free YouTube captions...');
+        setStageMessage('Extracting YouTube transcript & closed captions...');
       }, 700);
 
       const t3 = setTimeout(() => {
         setPipelineStage('EXTRACTING_AUDIO');
-        setStageMessage('YouTube captions unavailable. Extracting audio stream with yt-dlp...');
+        setStageMessage('Captions unavailable. Transcribing with Groq Whisper Large V3...');
       }, 2000);
 
       const t4 = setTimeout(() => {
         setPipelineStage('TRANSCRIBING');
-        setStageMessage('Transcribing audio with Groq Whisper Large V3...');
-      }, 4500);
+        setStageMessage('Polishing and simplifying into clean Simple English...');
+      }, 3500);
 
       try {
         const data = await transcriptService.fetchUnifiedTranscript(url, targetLang);
@@ -108,7 +197,36 @@ export default function Transcript() {
         clearTimeout(t3);
         clearTimeout(t4);
         setPipelineStage('COMPLETED');
-        setStageMessage('Transcript acquisition completed!');
+        setStageMessage('Transcript acquisition completed in Simple English!');
+
+        if (requestSeqRef.current !== currentSeq) {
+          return;
+        }
+
+        // Establish canonical verbatim source (IMMUTABLE)
+        const rawText = data.raw_transcript || data.transcript;
+        const rawSegs = data.raw_segments && data.raw_segments.length > 0 ? data.raw_segments : data.segments;
+        setCanonicalData({
+          transcript: rawText,
+          segments: rawSegs || [],
+          sourceLanguage: data.source_language || 'en',
+          provider: data.provider,
+          duration_seconds: data.duration_seconds,
+          confidence: data.confidence,
+          title: data.title,
+        });
+
+        // Store transformation cache slot
+        if (data.output_language === 'en' || data.output_language === 'hi') {
+          setTransformations(prev => ({
+            ...prev,
+            [data.output_language]: {
+              transcript: data.transcript,
+              segments: data.segments || [],
+            },
+          }));
+        }
+
         setUnifiedResult(data);
 
         // Map to legacy videoResult for compatibility with export tools
@@ -119,11 +237,11 @@ export default function Transcript() {
           duration: data.duration_seconds
             ? `${Math.floor(data.duration_seconds / 60)}:${String(Math.floor(data.duration_seconds % 60)).padStart(2, '0')}`
             : '0:00',
-          language: data.source_language,
+          language: data.output_language === 'en' ? 'Simple English' : data.source_language,
           script: 'Standard',
           status: 'success',
           transcript: data.transcript,
-          raw_transcript: data.transcript,
+          raw_transcript: rawText,
           source: data.provider,
           method: data.provider.includes('whisper') ? 'speech_to_text' : 'caption',
           error_code: null,
@@ -134,6 +252,9 @@ export default function Transcript() {
         clearTimeout(t2);
         clearTimeout(t3);
         clearTimeout(t4);
+        if (requestSeqRef.current !== currentSeq) {
+          return;
+        }
         setPipelineStage('FAILED');
         const errCode = err?.error_code || 'TRANSCRIPTION_FAILED';
         const errMsg = err instanceof Error ? err.message : String(err);
@@ -145,43 +266,79 @@ export default function Transcript() {
         });
         setError(errMsg);
       } finally {
-        setLoading(false);
+        if (requestSeqRef.current === currentSeq) {
+          setLoading(false);
+        }
       }
     },
     [currentVideoUrl]
   );
 
   const handleLanguageChange = async (newLang: OutputLanguage) => {
-    if (newLang === activeLang || !currentVideoUrl) return;
-    setActiveLang(newLang);
+    if (newLang === selectedMode || !currentVideoUrl) return;
+
+    // 1. Immediately update selectedMode (single source of truth for display & buttons)
+    setSelectedMode(newLang);
+
+    // 2. Switching to Original Spoken: canonical verbatim source is already in memory!
+    // Instant 0ms switch, zero network calls, zero mutations.
+    if (newLang === 'original') {
+      return;
+    }
+
+    // 3. Switching to Simple English or Simple Hindi: if already cached, instant 0ms switch!
+    if (transformations[newLang]?.transcript) {
+      return;
+    }
+
+    // 4. In-flight fetch needed for new transformation language with race protection
+    const currentSeq = ++requestSeqRef.current;
     setIsTranslating(true);
     try {
       const data = await transcriptService.fetchUnifiedTranscript(currentVideoUrl, newLang);
-      setUnifiedResult(data);
-      if (videoResult) {
-        setVideoResult({
-          ...videoResult,
+
+      // Always save to transformation cache
+      setTransformations(prev => ({
+        ...prev,
+        [newLang]: {
           transcript: data.transcript,
-        });
+          segments: data.segments || [],
+        },
+      }));
+
+      // Update unifiedResult & legacy videoResult only if request is still current
+      if (requestSeqRef.current === currentSeq) {
+        setUnifiedResult(data);
+        if (videoResult) {
+          setVideoResult({
+            ...videoResult,
+            transcript: data.transcript,
+            language: newLang === 'en' ? 'Simple English' : newLang === 'hi' ? 'Simple Hindi' : data.source_language,
+          });
+        }
       }
     } catch (err: any) {
-      console.error('Translation switch failed:', err);
-      const errCode = err?.error_code || 'TRANSLATION_FAILED';
-      const errMsg = err instanceof Error ? err.message : String(err);
-      setStructuredError({
-        error_code: errCode,
-        message: errMsg,
-        retryable: true,
-      });
+      if (requestSeqRef.current === currentSeq) {
+        console.error('Translation switch failed:', err);
+        const errCode = err?.error_code || 'TRANSLATION_FAILED';
+        const errMsg = err instanceof Error ? err.message : String(err);
+        setStructuredError({
+          error_code: errCode,
+          message: errMsg,
+          retryable: true,
+        });
+      }
     } finally {
-      setIsTranslating(false);
+      if (requestSeqRef.current === currentSeq) {
+        setIsTranslating(false);
+      }
     }
   };
 
   const handleSingleVideoSubmit = useCallback(
     (videoId: string, normalizedUrl?: string) => {
-      console.log('[Transcript] handleSingleVideoSubmit:', videoId, normalizedUrl);
-      fetchSingleTranscript(videoId, normalizedUrl, 'original');
+      console.log('[Transcript] handleSingleVideoSubmit (Simple English default):', videoId, normalizedUrl);
+      fetchSingleTranscript(videoId, normalizedUrl, 'en');
     },
     [fetchSingleTranscript]
   );
@@ -189,15 +346,14 @@ export default function Transcript() {
   const handleRetry = () => {
     const vid = processingVideoId || validatedVideoId;
     if (vid) {
-      fetchSingleTranscript(vid, currentVideoUrl, activeLang);
+      fetchSingleTranscript(vid, currentVideoUrl, selectedMode);
     }
   };
 
   const handleCopyTranscript = async () => {
-    const textToCopy = unifiedResult?.transcript || videoResult?.transcript;
-    if (!textToCopy) return;
+    if (!displayedTranscript) return;
     try {
-      await navigator.clipboard.writeText(textToCopy);
+      await navigator.clipboard.writeText(displayedTranscript);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
@@ -218,9 +374,11 @@ export default function Transcript() {
         if (updated.videos && updated.videos.length > 0) {
           setChannelVideos(updated.videos);
         }
-        if (updated.status === 'completed' || updated.status === 'cancelled' || updated.status === 'failed') {
+        if (updated.status === 'completed' || updated.status === 'cancelled' || updated.status === 'failed' || updated.status === 'paused') {
           setChannelLoading(false);
-          clearInterval(interval);
+          if (updated.status !== 'paused') {
+            clearInterval(interval);
+          }
         }
       } catch (err) {
         console.error('Job polling error:', err);
@@ -243,7 +401,14 @@ export default function Transcript() {
 
     try {
       if (useBackgroundMode) {
-        const job = await transcriptService.startTranscriptJob(handle, maxVideos);
+        const job = await transcriptService.startTranscriptJob(
+          handle,
+          maxVideos,
+          false,
+          publishedAfter || null,
+          publishedBefore || null,
+          channelOutputLang,
+        );
         setActiveJob(job);
         if (job.videos) {
           setChannelVideos(job.videos);
@@ -261,7 +426,7 @@ export default function Transcript() {
         setChannelError(err instanceof Error ? err.message : String(err));
       }
     }
-  }, [maxVideos, useBackgroundMode]);
+  }, [maxVideos, useBackgroundMode, publishedAfter, publishedBefore, channelOutputLang]);
 
   const handleCancelJob = async () => {
     if (!activeJob) return;
@@ -271,6 +436,21 @@ export default function Transcript() {
       setChannelLoading(false);
     } catch (err) {
       console.error('Cancel job error:', err);
+    }
+  };
+
+  const handleResumeJob = async () => {
+    if (!activeJob) return;
+    try {
+      setChannelLoading(true);
+      const resumed = await transcriptService.resumeJob(activeJob.job_id);
+      setActiveJob(resumed);
+      if (resumed.videos) {
+        setChannelVideos(resumed.videos);
+      }
+    } catch (err) {
+      console.error('Resume job error:', err);
+      setChannelLoading(false);
     }
   };
 
@@ -292,7 +472,10 @@ export default function Transcript() {
         return;
       }
 
-      const body: Record<string, unknown> = { format: 'csv' };
+      const body: Record<string, unknown> = {
+        format: 'csv',
+        output_language: selectedMode,
+      };
       if (channelHandle) {
         body.channel_handle = channelHandle;
         body.max_videos = maxVideos;
@@ -476,6 +659,142 @@ export default function Transcript() {
                     </div>
                   </div>
 
+                  {/* --- DATE RANGE FILTER & PRESETS --- */}
+                  <div className="mb-4 p-4 rounded-xl bg-gray-50/70 dark:bg-gray-800/40 border border-gray-200/80 dark:border-gray-700/60">
+                    <div className="flex items-center justify-between mb-2.5">
+                      <label className="flex items-center gap-2 text-sm font-semibold text-gray-800 dark:text-gray-200">
+                        <Calendar size={15} className="text-violet-600 dark:text-violet-400" />
+                        <span>Date Range Filter</span>
+                        <span className="text-[11px] font-normal text-gray-500 dark:text-gray-400">
+                          (Stops scanning older videos early to save API quota)
+                        </span>
+                      </label>
+                      {channelDatePreset !== 'all' && (
+                        <button
+                          type="button"
+                          onClick={() => handleDatePresetChange('all')}
+                          className="text-xs text-violet-600 dark:text-violet-400 hover:underline cursor-pointer"
+                        >
+                          Clear Date Filter
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Quick Presets */}
+                    <div className="flex flex-wrap gap-2 mb-3">
+                      {[
+                        { id: 'all', label: 'All Time' },
+                        { id: '30d', label: 'Last 30 Days' },
+                        { id: '3m', label: 'Last 3 Months' },
+                        { id: '6m', label: 'Last 6 Months' },
+                        { id: '1y', label: 'Last 1 Year' },
+                        { id: 'custom', label: 'Custom' },
+                      ].map((preset) => (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          onClick={() => handleDatePresetChange(preset.id as any)}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                            channelDatePreset === preset.id
+                              ? 'bg-violet-600 text-white shadow-sm'
+                              : 'bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700'
+                          }`}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Date Pickers */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                      <div>
+                        <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+                          Published After (From)
+                        </span>
+                        <input
+                          type="date"
+                          value={publishedAfter}
+                          onChange={(e) => {
+                            setPublishedAfter(e.target.value);
+                            setChannelDatePreset('custom');
+                          }}
+                          className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-xs text-gray-800 dark:text-gray-200 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-200 dark:focus:ring-violet-900/40"
+                        />
+                      </div>
+                      <div>
+                        <span className="block text-xs font-medium text-gray-600 dark:text-gray-400 mb-1">
+                          Published Before (To)
+                        </span>
+                        <input
+                          type="date"
+                          value={publishedBefore}
+                          onChange={(e) => {
+                            setPublishedBefore(e.target.value);
+                            setChannelDatePreset('custom');
+                          }}
+                          className="w-full px-3 py-2 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-xs text-gray-800 dark:text-gray-200 outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-200 dark:focus:ring-violet-900/40"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* --- OUTPUT LANGUAGE SELECTOR --- */}
+                  <div className="mb-4 p-4 rounded-xl bg-gray-50/70 dark:bg-gray-800/40 border border-gray-200/80 dark:border-gray-700/60">
+                    <label className="flex items-center gap-2 text-sm font-semibold text-gray-800 dark:text-gray-200 mb-2.5">
+                      <Languages size={15} className="text-violet-600 dark:text-violet-400" />
+                      <span>Output Transcript Format</span>
+                    </label>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setChannelOutputLang('en')}
+                        className={`flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                          channelOutputLang === 'en'
+                            ? 'bg-violet-600 text-white shadow-sm'
+                            : 'bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700'
+                        }`}
+                      >
+                        <Sparkles size={13} className={channelOutputLang === 'en' ? 'text-amber-200' : 'text-amber-500'} />
+                        <span className="font-semibold">Simple English</span>
+                        <span className="text-[10px] opacity-80">(Default)</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setChannelOutputLang('original')}
+                        className={`flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                          channelOutputLang === 'original'
+                            ? 'bg-violet-600 text-white shadow-sm'
+                            : 'bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700'
+                        }`}
+                      >
+                        <Globe size={13} />
+                        <span>Original Spoken</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setChannelOutputLang('hi')}
+                        className={`flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-all cursor-pointer ${
+                          channelOutputLang === 'hi'
+                            ? 'bg-violet-600 text-white shadow-sm'
+                            : 'bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700'
+                        }`}
+                      >
+                        <FileText size={13} />
+                        <span>Simple Hindi</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* --- PRODUCTION BULK SCRAPING SAFEGUARD NOTE --- */}
+                  <div className="mb-4 px-3.5 py-2.5 rounded-xl bg-violet-50/70 dark:bg-violet-950/20 border border-violet-200 dark:border-violet-800/40 text-xs text-violet-800 dark:text-violet-300 flex items-center gap-2.5">
+                    <Cpu size={16} className="text-violet-600 dark:text-violet-400 flex-shrink-0" />
+                    <span>
+                      <strong>Bulk Scraping Protected:</strong> 2.5s jittered pacing & automatic circuit breaker cooldown protect your IP. Progress is saved after every video and can be resumed anytime.
+                    </span>
+                  </div>
+
                   <button
                     type="submit"
                     disabled={channelLoading}
@@ -644,6 +963,16 @@ export default function Transcript() {
                         <Loader2 size={12} className="animate-spin" /> Running
                       </span>
                     )}
+                    {activeJob.status === 'cooldown' && (
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-orange-100 text-orange-800 dark:bg-orange-950/60 dark:text-orange-300 border border-orange-300 dark:border-orange-800 animate-pulse">
+                        <Clock size={12} /> Cooldown ({Math.ceil(activeJob.cooldown_seconds_remaining || 0)}s)
+                      </span>
+                    )}
+                    {activeJob.status === 'paused' && (
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800">
+                        <AlertCircle size={12} /> Paused (Rate Limit)
+                      </span>
+                    )}
                     {activeJob.status === 'completed' && (
                       <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800">
                         <CheckCircle2 size={12} /> Completed
@@ -654,12 +983,21 @@ export default function Transcript() {
                         <StopCircle size={12} /> Cancelled
                       </span>
                     )}
-                    {activeJob.status === 'running' && (
+                    {(activeJob.status === 'running' || activeJob.status === 'cooldown') && (
                       <button
                         onClick={handleCancelJob}
-                        className="px-3 py-1 rounded-lg text-xs font-semibold bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300 border border-red-200 dark:border-red-800 hover:bg-red-100"
+                        className="px-3 py-1 rounded-lg text-xs font-semibold bg-red-50 text-red-700 dark:bg-red-950/40 dark:text-red-300 border border-red-200 dark:border-red-800 hover:bg-red-100 cursor-pointer"
                       >
                         Cancel
+                      </button>
+                    )}
+                    {(activeJob.status === 'paused' || activeJob.status === 'cancelled' || (activeJob.status === 'completed' && ((activeJob.rate_limited || 0) > 0 || activeJob.remaining > 0))) && (
+                      <button
+                        onClick={handleResumeJob}
+                        disabled={channelLoading}
+                        className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm cursor-pointer disabled:opacity-50"
+                      >
+                        <RefreshCw size={12} className={channelLoading ? "animate-spin" : ""} /> Resume Job
                       </button>
                     )}
                   </div>
@@ -680,7 +1018,7 @@ export default function Transcript() {
                 </div>
 
                 {/* Metric counters */}
-                <div className="grid grid-cols-2 sm:grid-cols-6 gap-2 text-center text-xs">
+                <div className="grid grid-cols-2 sm:grid-cols-7 gap-2 text-center text-xs">
                   <div className="bg-gray-50 dark:bg-gray-800/60 p-2 rounded-lg">
                     <p className="text-gray-400 text-[10px] uppercase">Eligible</p>
                     <p className="text-sm font-bold text-gray-800 dark:text-gray-200">{activeJob.eligible_videos}</p>
@@ -697,6 +1035,10 @@ export default function Transcript() {
                     <p className="text-amber-600 dark:text-amber-400 text-[10px] uppercase">No Captions</p>
                     <p className="text-sm font-bold text-amber-700 dark:text-amber-300">{activeJob.no_captions}</p>
                   </div>
+                  <div className="bg-orange-50 dark:bg-orange-950/40 p-2 rounded-lg border border-orange-200 dark:border-orange-800">
+                    <p className="text-orange-600 dark:text-orange-400 text-[10px] uppercase">Rate Limited</p>
+                    <p className="text-sm font-bold text-orange-700 dark:text-orange-300">{activeJob.rate_limited || 0}</p>
+                  </div>
                   <div className="bg-rose-50 dark:bg-rose-950/40 p-2 rounded-lg border border-rose-200 dark:border-rose-800">
                     <p className="text-rose-600 dark:text-rose-400 text-[10px] uppercase">Failed</p>
                     <p className="text-sm font-bold text-rose-700 dark:text-rose-300">{activeJob.failed}</p>
@@ -710,7 +1052,7 @@ export default function Transcript() {
             )}
 
             {/* --- SINGLE VIDEO RESULT --- */}
-            {(unifiedResult || videoResult) && !channelVideos && (
+            {(canonicalData || unifiedResult || videoResult) && !channelVideos && (
               <div className="mb-6 space-y-4">
                 <Card padding="lg" className="border-gray-200 dark:border-gray-800 shadow-xl">
                   {/* Header */}
@@ -725,7 +1067,7 @@ export default function Transcript() {
                         )}
                       </div>
                       <h2 className="text-lg sm:text-xl font-bold text-gray-900 dark:text-white mt-1">
-                        {unifiedResult?.title || videoResult?.title || 'YouTube Video'}
+                        {canonicalData?.title || unifiedResult?.title || videoResult?.title || 'YouTube Video'}
                       </h2>
                     </div>
 
@@ -746,56 +1088,58 @@ export default function Transcript() {
                           <Database size={12} /> Cached Transcript
                         </span>
                       )}
-                      {unifiedResult && unifiedResult.output_language !== 'original' && (
-                        <span className="px-3 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-300 dark:border-amber-800 flex items-center gap-1.5">
-                          <Sparkles size={12} /> Derived Translation
+                      {(canonicalData || unifiedResult) && (
+                        <span className="px-3 py-1 rounded-full text-xs font-semibold bg-indigo-100 text-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-300 border border-indigo-300 dark:border-indigo-800 flex items-center gap-1.5">
+                          <Sparkles size={12} /> {selectedMode === 'en' ? 'Simple English' : selectedMode === 'hi' ? 'Simple Hindi' : 'Original Spoken'}
                         </span>
                       )}
                     </div>
                   </div>
 
-                  {/* 3-Way Language Toggle Toolbar */}
+                  {/* 3-Way Language Toggle Toolbar — Simple English is Default */}
                   <div className="bg-gray-100 dark:bg-gray-800/80 p-1.5 rounded-xl flex items-center gap-1 mb-4">
                     <button
-                      onClick={() => handleLanguageChange('original')}
-                      disabled={isTranslating}
+                      onClick={() => handleLanguageChange('en')}
+                      disabled={isTranslating && selectedMode === 'en'}
                       className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-2 cursor-pointer ${
-                        activeLang === 'original'
-                          ? 'bg-white dark:bg-gray-900 text-gray-900 dark:text-white shadow-sm'
+                        selectedMode === 'en'
+                          ? 'bg-white dark:bg-gray-900 text-indigo-600 dark:text-indigo-400 shadow-sm font-bold border border-indigo-200/60 dark:border-indigo-800/60'
+                          : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
+                      }`}
+                    >
+                      {isTranslating && selectedMode === 'en' ? (
+                        <Loader2 size={13} className="animate-spin" />
+                      ) : (
+                        <Sparkles size={13} className="text-indigo-500" />
+                      )}
+                      <span>Simple English</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 dark:bg-indigo-950/80 dark:text-indigo-300 font-semibold border border-indigo-200/50 dark:border-indigo-800/50">
+                        Default
+                      </span>
+                    </button>
+
+                    <button
+                      onClick={() => handleLanguageChange('original')}
+                      className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                        selectedMode === 'original'
+                          ? 'bg-white dark:bg-gray-900 text-gray-900 dark:text-white shadow-sm font-bold'
                           : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
                       }`}
                     >
                       <FileText size={13} />
-                      <span>Original ({unifiedResult?.source_language.toUpperCase() || 'ORIGINAL'})</span>
-                    </button>
-
-                    <button
-                      onClick={() => handleLanguageChange('en')}
-                      disabled={isTranslating}
-                      className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-2 cursor-pointer ${
-                        activeLang === 'en'
-                          ? 'bg-white dark:bg-gray-900 text-indigo-600 dark:text-indigo-400 shadow-sm font-bold'
-                          : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
-                      }`}
-                    >
-                      {isTranslating && activeLang === 'en' ? (
-                        <Loader2 size={13} className="animate-spin" />
-                      ) : (
-                        <Globe size={13} />
-                      )}
-                      <span>Simple English</span>
+                      <span>Original Spoken ({canonicalData?.sourceLanguage ? canonicalData.sourceLanguage.toUpperCase() : (unifiedResult?.source_language ? unifiedResult.source_language.toUpperCase() : 'RAW')})</span>
                     </button>
 
                     <button
                       onClick={() => handleLanguageChange('hi')}
-                      disabled={isTranslating}
+                      disabled={isTranslating && selectedMode === 'hi'}
                       className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-2 cursor-pointer ${
-                        activeLang === 'hi'
+                        selectedMode === 'hi'
                           ? 'bg-white dark:bg-gray-900 text-amber-600 dark:text-amber-400 shadow-sm font-bold'
                           : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
                       }`}
                     >
-                      {isTranslating && activeLang === 'hi' ? (
+                      {isTranslating && selectedMode === 'hi' ? (
                         <Loader2 size={13} className="animate-spin" />
                       ) : (
                         <Languages size={13} />
@@ -809,14 +1153,14 @@ export default function Transcript() {
                     <div>
                       <span className="font-semibold text-gray-700 dark:text-gray-300">Words: </span>
                       <span className="font-bold text-gray-900 dark:text-white">
-                        {unifiedResult?.word_count || (videoResult?.transcript ? videoResult.transcript.split(/\s+/).length : 0)}
+                        {displayedWordCount}
                       </span>
                     </div>
-                    {unifiedResult?.duration_seconds ? (
+                    {(canonicalData?.duration_seconds || unifiedResult?.duration_seconds) ? (
                       <div>
                         <span className="font-semibold text-gray-700 dark:text-gray-300">Duration: </span>
                         <span className="font-medium text-gray-900 dark:text-white">
-                          {Math.floor(unifiedResult.duration_seconds / 60)}:{String(Math.floor(unifiedResult.duration_seconds % 60)).padStart(2, '0')}
+                          {Math.floor((canonicalData?.duration_seconds || unifiedResult?.duration_seconds || 0) / 60)}:{String(Math.floor((canonicalData?.duration_seconds || unifiedResult?.duration_seconds || 0) % 60)).padStart(2, '0')}
                         </span>
                       </div>
                     ) : videoResult?.duration ? (
@@ -828,16 +1172,16 @@ export default function Transcript() {
                     <div>
                       <span className="font-semibold text-gray-700 dark:text-gray-300">Confidence: </span>
                       <span className="font-semibold text-emerald-600 dark:text-emerald-400">
-                        {Math.round((unifiedResult?.confidence || 0.95) * 100)}%
+                        {Math.round((canonicalData?.confidence || unifiedResult?.confidence || 0.95) * 100)}%
                       </span>
                     </div>
-                    {unifiedResult?.segments && unifiedResult.segments.length > 0 && (
+                    {displayedSegments && displayedSegments.length > 0 && (
                       <div className="flex items-center gap-1.5 ml-auto">
                         <span className="font-semibold text-gray-700 dark:text-gray-300">View:</span>
                         <div className="inline-flex rounded-lg border border-gray-200 dark:border-gray-700 p-0.5 bg-gray-50 dark:bg-gray-800">
                           <button
                             onClick={() => setViewMode('text')}
-                            className={`px-2 py-0.5 rounded text-[11px] font-medium transition-all ${
+                            className={`px-2 py-0.5 rounded text-[11px] font-medium transition-all cursor-pointer ${
                               viewMode === 'text' ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-xs' : 'text-gray-500'
                             }`}
                           >
@@ -845,11 +1189,11 @@ export default function Transcript() {
                           </button>
                           <button
                             onClick={() => setViewMode('segments')}
-                            className={`px-2 py-0.5 rounded text-[11px] font-medium transition-all ${
+                            className={`px-2 py-0.5 rounded text-[11px] font-medium transition-all cursor-pointer ${
                               viewMode === 'segments' ? 'bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-xs' : 'text-gray-500'
                             }`}
                           >
-                            Timestamps ({unifiedResult.segments.length})
+                            Timestamps ({displayedSegments.length})
                           </button>
                         </div>
                       </div>
@@ -870,9 +1214,9 @@ export default function Transcript() {
                   <div>
                     <div className="flex items-center justify-between mb-2">
                       <p className="text-xs text-gray-400 dark:text-gray-500 uppercase tracking-wider font-semibold">
-                        {activeLang === 'original'
-                          ? 'Canonical Transcript'
-                          : activeLang === 'en'
+                        {selectedMode === 'original'
+                          ? 'Canonical Original Spoken'
+                          : selectedMode === 'en'
                           ? 'Simple English Output'
                           : 'Simple Hindi Output'}
                       </p>
@@ -894,9 +1238,9 @@ export default function Transcript() {
                       </button>
                     </div>
 
-                    {viewMode === 'segments' && unifiedResult?.segments && unifiedResult.segments.length > 0 ? (
+                    {viewMode === 'segments' && displayedSegments && displayedSegments.length > 0 ? (
                       <div className="max-h-96 overflow-y-auto space-y-2 bg-gray-50 dark:bg-gray-800/50 rounded-xl p-4 border border-gray-100 dark:border-gray-800">
-                        {unifiedResult.segments.map((seg, idx) => (
+                        {displayedSegments.map((seg: UnifiedTranscriptSegment, idx: number) => (
                           <div key={idx} className="flex items-start gap-3 text-xs">
                             <span className="font-mono text-violet-600 dark:text-violet-400 font-semibold bg-violet-50 dark:bg-violet-950/60 px-2 py-0.5 rounded flex-shrink-0">
                               {Math.floor(seg.start / 60)}:{String(Math.floor(seg.start % 60)).padStart(2, '0')}
@@ -905,10 +1249,17 @@ export default function Transcript() {
                           </div>
                         ))}
                       </div>
+                    ) : isTranslating && !displayedTranscript ? (
+                      <div className="max-h-96 min-h-48 flex flex-col items-center justify-center bg-gray-50 dark:bg-gray-800/50 rounded-xl p-8 border border-gray-100 dark:border-gray-800 text-center">
+                        <Loader2 size={24} className="animate-spin text-indigo-600 dark:text-indigo-400 mb-2" />
+                        <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">
+                          Simplifying transcript with Groq LLM...
+                        </p>
+                      </div>
                     ) : (
                       <div className="max-h-96 overflow-y-auto bg-gray-50 dark:bg-gray-800/50 rounded-xl p-4 border border-gray-100 dark:border-gray-800">
                         <p className="text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap leading-relaxed font-sans">
-                          {unifiedResult?.transcript || videoResult?.transcript}
+                          {displayedTranscript}
                         </p>
                       </div>
                     )}
@@ -1007,10 +1358,15 @@ export default function Transcript() {
                           {video.title || `Video ${idx + 1}`}
                         </p>
                         <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">
-                          Duration: {video.duration}
+                          Duration: {video.duration}{video.published_at ? ` • Published: ${video.published_at.split('T')[0]}` : ''}
                         </p>
                       </div>
                       <div className="flex items-center gap-2 flex-shrink-0">
+                        {video.language === 'Simple English' && (
+                          <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800 flex items-center gap-1">
+                            <Sparkles size={10} className="text-emerald-600 dark:text-emerald-400" /> Simple English
+                          </span>
+                        )}
                         {video.method === 'caption' && (
                           <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800">
                             Captions
@@ -1026,9 +1382,9 @@ export default function Transcript() {
                             No Captions
                           </span>
                         )}
-                        {(!video.transcript && video.error_code === 'RATE_LIMITED') && (
+                        {(!video.transcript && (video.error_code === 'RATE_LIMITED' || video.status === 'rate_limited')) && (
                           <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-orange-100 text-orange-800 dark:bg-orange-950/60 dark:text-orange-300 border border-orange-300 dark:border-orange-800">
-                            Rate Limited
+                            {activeJob?.status === 'cooldown' ? 'Rate Limited (Cooldown)' : activeJob?.status === 'paused' ? 'Rate Limited (Paused)' : 'Rate Limited'}
                           </span>
                         )}
                         {video.status === 'processing' && (
@@ -1041,7 +1397,7 @@ export default function Transcript() {
                             Pending
                           </span>
                         )}
-                        {(!video.transcript && video.error_code && video.error_code !== 'NO_CAPTIONS' && video.error_code !== 'CAPTIONS_DISABLED' && video.error_code !== 'RATE_LIMITED') && (
+                        {(!video.transcript && video.error_code && video.error_code !== 'NO_CAPTIONS' && video.error_code !== 'CAPTIONS_DISABLED' && video.error_code !== 'RATE_LIMITED' && video.status !== 'rate_limited') && (
                           <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-300 border border-rose-300 dark:border-rose-800">
                             Failed: {video.error_code}
                           </span>
@@ -1058,12 +1414,14 @@ export default function Transcript() {
                       <div className="border-t border-gray-100 dark:border-gray-700 p-4">
                         {video.transcript ? (
                           <>
-                            <div className="flex items-center gap-4 mb-3 text-xs text-gray-500 dark:text-gray-400">
+                            <div className="flex items-center gap-4 mb-3 text-xs text-gray-500 dark:text-gray-400 flex-wrap">
                               <span>Method: <strong className="text-gray-700 dark:text-gray-300">{video.method}</strong></span>
                               <span>Source: <strong className="text-gray-700 dark:text-gray-300">{video.source}</strong></span>
                               {video.language && (
                                 <span>Language: {' '}
-                                  {video.language.toLowerCase().includes('english') ? (
+                                  {video.language === 'Simple English' ? (
+                                    <strong className="text-emerald-600 dark:text-emerald-400 font-semibold">Simple English</strong>
+                                  ) : video.language.toLowerCase().includes('english') ? (
                                     <strong className="text-blue-600 dark:text-blue-400">English (India)</strong>
                                   ) : video.language.toLowerCase() === 'hinglish' ? (
                                     <strong className="text-purple-600 dark:text-purple-400">Hinglish (Roman)</strong>
@@ -1083,21 +1441,72 @@ export default function Transcript() {
                                 </a>
                               )}
                             </div>
+
+                            {/* Simple English vs Original Spoken Toggle */}
+                            {Boolean(video.raw_transcript) && (() => {
+                              const isRawActive = showRawForIdx[idx] !== undefined
+                                ? showRawForIdx[idx]
+                                : (activeJob?.output_language === 'original');
+                              return (
+                                <div className="flex items-center gap-2 mb-3">
+                                  <button
+                                    type="button"
+                                    onClick={() => setShowRawForIdx(prev => ({ ...prev, [idx]: false }))}
+                                    className={`px-2.5 py-1 rounded-md text-xs font-semibold cursor-pointer transition-all flex items-center gap-1 ${
+                                      !isRawActive
+                                        ? 'bg-emerald-600 text-white shadow-sm'
+                                        : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'
+                                    }`}
+                                  >
+                                    <Sparkles size={11} /> Simple English
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setShowRawForIdx(prev => ({ ...prev, [idx]: true }))}
+                                    className={`px-2.5 py-1 rounded-md text-xs font-medium cursor-pointer transition-all flex items-center gap-1 ${
+                                      isRawActive
+                                        ? 'bg-violet-600 text-white shadow-sm font-semibold'
+                                        : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'
+                                    }`}
+                                  >
+                                    <FileText size={11} /> Original Spoken
+                                  </button>
+                                </div>
+                              );
+                            })()}
+
                             <div className="max-h-80 overflow-y-auto bg-gray-50 dark:bg-gray-800/50 rounded-xl p-4">
                               <p className="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap leading-relaxed">
-                                {video.transcript}
+                                {((showRawForIdx[idx] !== undefined ? showRawForIdx[idx] : activeJob?.output_language === 'original') && video.raw_transcript)
+                                  ? video.raw_transcript
+                                  : video.transcript}
                               </p>
                             </div>
                           </>
                         ) : (
-                          <div className="bg-gray-50 dark:bg-gray-800/40 rounded-xl p-4 text-center">
-                            <AlertCircle size={20} className="text-amber-500 mx-auto mb-2" />
+                          <div className={`rounded-xl p-4 text-center ${
+                            video.error_code === 'RATE_LIMITED' || video.status === 'rate_limited'
+                              ? 'bg-orange-50/70 dark:bg-orange-950/20 border border-orange-200 dark:border-orange-900/40'
+                              : 'bg-gray-50 dark:bg-gray-800/40'
+                          }`}>
+                            {video.error_code === 'RATE_LIMITED' || video.status === 'rate_limited' ? (
+                              <Clock size={20} className="text-orange-500 mx-auto mb-2" />
+                            ) : (
+                              <AlertCircle size={20} className="text-amber-500 mx-auto mb-2" />
+                            )}
                             <p className="text-sm font-semibold text-gray-800 dark:text-gray-200">
-                              {video.error_message || 'Closed captions are not available on YouTube for this video.'}
+                              {video.error_code === 'RATE_LIMITED' || video.status === 'rate_limited'
+                                ? 'YouTube is temporarily throttling transcript requests (HTTP 429). The system applies backoff pacing and saves your progress.'
+                                : (video.error_message || 'Closed captions are not available on YouTube for this video.')}
                             </p>
                             <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
-                              Reason Code: <code className="text-violet-600 dark:text-violet-400">{video.error_code || 'NO_CAPTIONS'}</code>
+                              Reason Code: <code className="text-violet-600 dark:text-violet-400">{video.error_code || (video.status === 'rate_limited' ? 'RATE_LIMITED' : 'NO_CAPTIONS')}</code>
                             </p>
+                            {(video.error_code === 'RATE_LIMITED' || video.status === 'rate_limited') && (
+                              <p className="text-xs text-orange-600 dark:text-orange-400 mt-2 font-medium">
+                                Progress is preserved in disk checkpoints. You can resume this job whenever the cooldown finishes or your IP rate limit clears.
+                              </p>
+                            )}
                             {video.video_url && (
                               <div className="mt-3">
                                 <a

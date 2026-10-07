@@ -111,10 +111,15 @@ class Settings:
     whisper_compute_type: str = _get_env("WHISPER_COMPUTE_TYPE", "auto")
     min_transcript_duration: int = int(_get_env("MIN_TRANSCRIPT_DURATION", "180"))
     max_transcript_duration: int = int(_get_env("MAX_TRANSCRIPT_DURATION", "1800"))
-    transcript_max_concurrency: int = int(_get_env("TRANSCRIPT_MAX_CONCURRENCY", "5"))
+    transcript_max_concurrency: int = int(_get_env("TRANSCRIPT_MAX_CONCURRENCY", "1"))
     whisper_max_concurrency: int = int(_get_env("WHISPER_MAX_CONCURRENCY", "1"))
+    transcript_request_interval: float = float(_get_env("TRANSCRIPT_REQUEST_INTERVAL", "2.5"))
+    transcript_rate_limit_cooldown_base: float = float(_get_env("TRANSCRIPT_COOLDOWN_BASE", "30.0"))
+    transcript_rate_limit_cooldown_max: float = float(_get_env("TRANSCRIPT_COOLDOWN_MAX", "300.0"))
+    transcript_max_rate_limit_retries: int = int(_get_env("TRANSCRIPT_MAX_RETRIES", "3"))
     audio_temp_dir: Path = BASE_DIR / "tmp" / "audio"
     transcript_cache_dir: Path = BASE_DIR / "data" / "transcripts"
+    transcript_jobs_dir: Path = BASE_DIR / "data" / "transcript_jobs"
     max_retries: int = int(_get_env("MAX_RETRIES", "3"))
     retry_backoff_base: float = float(_get_env("RETRY_BACKOFF_BASE", "2.0"))
 
@@ -128,6 +133,7 @@ class Settings:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.audio_temp_dir.mkdir(parents=True, exist_ok=True)
         self.transcript_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.transcript_jobs_dir.mkdir(parents=True, exist_ok=True)
 
 
 # Singleton settings instance

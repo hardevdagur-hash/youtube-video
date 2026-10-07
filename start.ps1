@@ -26,13 +26,19 @@ if (-not $env:YOUTUBE_API_KEY) {
 
 # Resolve python command
 $pyCmd = "python"
-try {
-    $testOut = & python --version 2>&1
-    if ($LASTEXITCODE -ne 0 -or "$testOut" -like "*Microsoft Store*") {
+if (Test-Path (Join-Path $rootDir ".venv\Scripts\python.exe")) {
+    $pyCmd = Join-Path $rootDir ".venv\Scripts\python.exe"
+} elseif (Test-Path (Join-Path $rootDir "venv\Scripts\python.exe")) {
+    $pyCmd = Join-Path $rootDir "venv\Scripts\python.exe"
+} else {
+    try {
+        $testOut = & python --version 2>&1
+        if ($LASTEXITCODE -ne 0 -or "$testOut" -like "*Microsoft Store*") {
+            $pyCmd = "py"
+        }
+    } catch {
         $pyCmd = "py"
     }
-} catch {
-    $pyCmd = "py"
 }
 
 # Start backend

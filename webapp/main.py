@@ -66,6 +66,7 @@ from services.english_converter import english_converter
 from observability.config import ObservabilityConfig
 from observability.instrumentation import instrument_fastapi
 from observability.telemetry import TelemetryOrchestrator
+from services.english_converter import english_converter
 
 setup_logging()
 
@@ -506,7 +507,7 @@ def _get_video_service():
 
 class UnifiedTranscriptRequest(BaseModel):
     video_url: str
-    output_language: str = "original"  # "original" | "en" | "hi"
+    output_language: str = "en"  # "en" (Simple English default) | "original" | "hi"
 
 
 _shared_transcript_repo = None
@@ -538,7 +539,7 @@ async def api_transcript_unified(request: UnifiedTranscriptRequest):
       5. Cleans and normalizes transcript
       6. Validates transcript quality and checks for hallucination loops
       7. Caches canonical transcript
-      8. If output_language is 'en' or 'hi', derives on-demand translation with caching
+      8. Defaults to 'en' (Simple English) with strict educational pedagogical simplification
     """
     from exceptions import YouTubeURLError
     from observability.transcript_metrics import transcript_metrics
@@ -559,7 +560,7 @@ async def api_transcript_unified(request: UnifiedTranscriptRequest):
 
     rid = uuid.uuid4().hex[:8]
     transcript_metrics.record_request_start()
-    out_lang = (request.output_language or "original").lower().strip()
+    out_lang = (request.output_language or "en").lower().strip()
     if out_lang not in ("original", "en", "hi"):
         return JSONResponse(
             status_code=400,
@@ -601,26 +602,38 @@ async def api_transcript_unified(request: UnifiedTranscriptRequest):
                     words=canonical.get("word_count", 0),
                 )
 
-        # Handle on-demand translation if requested
+        # Handle on-demand translation / Simple English if requested
         final_text = canonical_text
         final_segments = segments
         final_provider = provider
         final_from_cache = from_cache
+        fallback_to_original = False
 
         if out_lang in ("en", "hi"):
-            trans_result = await _to_thread(
-                trans_service.translate,
-                video_id=video_id,
-                original_text=canonical_text,
-                target_language=out_lang,
-                source_language=source_lang,
-                original_segments=segments,
-            )
-            final_text = trans_result["transcript"]
-            final_segments = trans_result.get("segments", [])
-            final_provider = trans_result.get("provider", f"groq_translation_{out_lang}")
-            final_from_cache = trans_result.get("from_cache", False)
-            transcript_metrics.record_translation(lang=out_lang, cache_hit=final_from_cache)
+            try:
+                trans_result = await _to_thread(
+                    trans_service.translate,
+                    video_id=video_id,
+                    original_text=canonical_text,
+                    target_language=out_lang,
+                    source_language=source_lang,
+                    original_segments=segments,
+                )
+                final_text = trans_result["transcript"]
+                final_segments = trans_result.get("segments", [])
+                final_provider = trans_result.get("provider", f"groq_translation_{out_lang}")
+                final_from_cache = trans_result.get("from_cache", False)
+                transcript_metrics.record_translation(lang=out_lang, cache_hit=final_from_cache)
+            except Exception as trans_exc:
+                logger.warning(
+                    "[%s] Translation to '%s' failed: %s; gracefully falling back to canonical transcript",
+                    rid, out_lang, trans_exc,
+                )
+                fallback_to_original = True
+                final_text = canonical_text
+                final_segments = segments
+                final_provider = provider
+                final_from_cache = from_cache
 
         # Try to retrieve video title if available
         title = None
@@ -639,9 +652,12 @@ async def api_transcript_unified(request: UnifiedTranscriptRequest):
             "video_id": video_id,
             "title": title,
             "source_language": source_lang,
-            "output_language": out_lang,
+            "output_language": out_lang if not fallback_to_original else "original",
             "provider": final_provider,
             "transcript": final_text,
+            "raw_transcript": canonical_text,
+            "raw_segments": segments,
+            "fallback_to_original": fallback_to_original,
             "segments": final_segments,
             "word_count": len(final_text.split()),
             "duration_seconds": duration_seconds,
@@ -782,6 +798,14 @@ async def api_transcript_metrics():
         "success": True,
         "metrics": transcript_metrics.get_snapshot(),
     }
+
+
+@app.get("/api/transcript/limiter/status")
+@app.get("/api/transcript-limiter/status")
+async def api_transcript_limiter_status():
+    """Return current transcript rate limiter and circuit breaker diagnostic metrics."""
+    from transcript_reliability.transcript_limiter import transcript_limiter
+    return success_response(data=transcript_limiter.get_status())
 
 
 @app.get("/api/transcript/{video_id}")
@@ -941,9 +965,13 @@ async def api_transcript_v2(video_id: str):
     if transcript:
         source = getattr(transcript.source, "value", str(transcript.source)) if transcript.source else None
         method = getattr(transcript, "method", None)
-        language = transcript.language or "English (India)"
-        if language and language.lower() in ("hinglish", "en", "english", "en-in", "hi", "hindi", "english (india)"):
-            language = "English (India)"
+        if getattr(transcript, "source_language", None):
+            language = transcript.source_language
+        elif str(transcript.language).lower() in ("hi", "hindi") or (raw_transcript_text and english_converter.contains_non_roman_script(raw_transcript_text)):
+            language = "Hindi"
+        else:
+            language = transcript.language or "English"
+
         if not transcript.success:
             error_code = getattr(transcript, "error_code", None) or "TRANSCRIPT_NOT_FOUND"
             error_message = transcript.error or "Failed to fetch transcript"
@@ -955,7 +983,10 @@ async def api_transcript_v2(video_id: str):
         if error_code == "VIDEO_UNAVAILABLE" and not error_message:
             error_message = "This video is unavailable, private, or deleted."
 
-    script = "Roman"
+    is_non_roman = False
+    if isinstance(raw_transcript_text, str) and raw_transcript_text:
+        is_non_roman = english_converter.contains_non_roman_script(raw_transcript_text)
+    script = "Devanagari" if is_non_roman else "Standard"
 
     logger.info("[%s] Returning v2 result for %s: title='%s', status='%s', method='%s', len=%d",
                 rid, video_id, title, status, method, len(transcript_text))
@@ -1117,10 +1148,13 @@ async def api_channel_transcripts(
             "[%s] Stage 5/5: Fetching transcripts for %d eligible videos (concurrency=%d)",
             rid, len(eligible_videos), concurrency,
         )
-        semaphore = asyncio.Semaphore(concurrency)
+        from transcript_reliability.transcript_limiter import transcript_limiter
+        eff_concurrency = min(concurrency, settings.transcript_max_concurrency)
+        semaphore = asyncio.Semaphore(eff_concurrency)
 
         async def _fetch_one(video_id: str, idx: int) -> dict:
             async with semaphore:
+                await transcript_limiter.acquire(video_id)
                 meta = videos_metadata.get(video_id, {})
                 title = meta.get("title", "")
                 published_at = meta.get("published_at", "")
@@ -1294,8 +1328,11 @@ async def api_channel_transcripts(
 class TranscriptJobCreateRequest(BaseModel):
     max_videos: int = 0
     force_refresh: bool = False
-    caption_concurrency: int = 5
+    caption_concurrency: int = 1
     whisper_concurrency: int = 1
+    published_after: str | None = None
+    published_before: str | None = None
+    output_language: str = "en"
 
 
 @app.post("/api/channel/{handle}/transcript-job")
@@ -1303,6 +1340,9 @@ async def api_start_channel_transcript_job(
     handle: str,
     max_videos: int = 0,
     force_refresh: bool = False,
+    published_after: str | None = None,
+    published_before: str | None = None,
+    output_language: str = "en",
     req: TranscriptJobCreateRequest | None = None,
 ):
     """Launch asynchronous background job for channel transcripts."""
@@ -1310,14 +1350,21 @@ async def api_start_channel_transcript_job(
     try:
         eff_max = req.max_videos if req and req.max_videos > 0 else max_videos
         eff_refresh = req.force_refresh if req else force_refresh
-        eff_caption_conc = req.caption_concurrency if req else 5
+        eff_caption_conc = req.caption_concurrency if req else settings.transcript_max_concurrency
         eff_whisper_conc = req.whisper_concurrency if req else 1
+        eff_pub_after = req.published_after if req and req.published_after else published_after
+        eff_pub_before = req.published_before if req and req.published_before else published_before
+        eff_out_lang = (req.output_language if req and req.output_language else output_language) or "en"
+
         progress = await transcript_job_manager.start_channel_job(
             channel_handle=handle,
             max_videos=eff_max,
             force_refresh=eff_refresh,
             caption_concurrency=eff_caption_conc,
             whisper_concurrency=eff_whisper_conc,
+            published_after=eff_pub_after,
+            published_before=eff_pub_before,
+            output_language=eff_out_lang,
         )
         return success_response(
             data=progress.model_dump(),
@@ -1348,14 +1395,25 @@ async def api_cancel_transcript_job(job_id: str):
     return success_response(message=f"Job '{job_id}' successfully cancelled")
 
 
+@app.post("/api/transcript/jobs/{job_id}/resume")
+async def api_resume_transcript_job(job_id: str):
+    """Resume a pending, paused, or rate-limited background job."""
+    from services.jobs.transcript_job_manager import transcript_job_manager
+    job = await transcript_job_manager.resume_job(job_id)
+    if not job:
+        return error_response(message=f"Job '{job_id}' not found", status_code=404)
+    return success_response(data=job.model_dump(), message=f"Job '{job_id}' resumed")
+
+
+
 @app.get("/api/transcript/jobs/{job_id}/download")
-async def api_download_transcript_job(job_id: str):
-    """Download 15-column CSV for a transcript background job."""
+async def api_download_transcript_job(job_id: str, audit: bool = False):
+    """Download CSV for a transcript background job with exact mode representation."""
     from services.jobs.transcript_job_manager import transcript_job_manager
     job = transcript_job_manager.get_job(job_id)
     if not job:
         return error_response(message=f"Job '{job_id}' not found", status_code=404)
-    csv_content = transcript_job_manager.generate_csv(job_id)
+    csv_content = transcript_job_manager.generate_csv(job_id, include_audit_columns=audit)
     clean_handle = (job.channel_handle or "channel").lstrip("@")
     filename = f"{clean_handle}_transcripts_{job_id}.csv"
     encoded = csv_content.encode("utf-8-sig")
@@ -1379,6 +1437,8 @@ class TranscriptExportRequest(BaseModel):
     channel_handle: str | None = None
     format: str = "csv"
     max_videos: int = 1000
+    output_language: str = "original"
+    include_audit_columns: bool = False
 
 
 def _csv_escape(text: str | None) -> str:
@@ -1392,16 +1452,19 @@ def _csv_escape(text: str | None) -> str:
     return s
 
 
-def _build_csv_rows(videos: list[dict]) -> str:
-    """Build a complete 15-column CSV string from a list of video dicts.
+def _build_csv_rows(videos: list[dict], output_language: str = "original", include_audit_columns: bool = False) -> str:
+    """Build a compliant CSV string from a list of video dicts with exact mode representation.
 
     Columns:
         video_id, video_url, channel_id, channel_title, title, published_at,
         duration_seconds, duration, language, status, transcript,
         source, method, error_code, error_message
+        (and optional audit columns: output_format, source_language, source_language_code)
     """
     output = io.StringIO()
     writer = csv.writer(output, lineterminator="\n")
+
+    out_mode = (output_language or "original").lower().strip()
 
     header = [
         "video_id",
@@ -1420,10 +1483,19 @@ def _build_csv_rows(videos: list[dict]) -> str:
         "error_code",
         "error_message",
     ]
+    if include_audit_columns:
+        header.extend(["output_format", "source_language", "source_language_code"])
     writer.writerow(header)
 
     for v in videos:
-        transcript_text = v.get("transcript", "")
+        # Determine exact transcript representation
+        if out_mode in ("original", "original_spoken"):
+            transcript_text = v.get("raw_transcript") or v.get("transcript", "")
+        elif out_mode == "hi":
+            transcript_text = v.get("simple_hindi_transcript") or v.get("transcript", "")
+        else:
+            transcript_text = v.get("simple_english_transcript") or v.get("transcript", "")
+
         if isinstance(transcript_text, dict):
             transcript_text = transcript_text.get("plain_text") or transcript_text.get("paragraph_text") or ""
 
@@ -1431,9 +1503,28 @@ def _build_csv_rows(videos: list[dict]) -> str:
         url = v.get("video_url") or (f"https://www.youtube.com/watch?v={vid}" if vid else "")
         status = v.get("status") or ("success" if transcript_text else "failed")
 
-        lang = v.get("language", "")
-        if lang and str(lang).lower() in ("hinglish", "en", "english", "en-in", "hi", "hindi", "english (india)"):
-            lang = "English (India)"
+        # Determine true source language without hardcoded corruption
+        raw_lang = v.get("source_language") or v.get("language", "")
+        is_hindi = (
+            str(raw_lang).lower() in ("hi", "hindi")
+            or (transcript_text and english_converter.contains_non_roman_script(str(transcript_text)))
+        )
+        if is_hindi:
+            source_lang = "Hindi"
+            source_code = "hi"
+        elif str(raw_lang).lower().startswith("en"):
+            source_lang = "English"
+            source_code = "en"
+        else:
+            source_lang = raw_lang or "auto"
+            source_code = str(raw_lang).lower()[:2] if raw_lang else "auto"
+
+        if out_mode in ("original", "original_spoken"):
+            lang = source_lang
+        elif out_mode == "hi":
+            lang = "Simple Hindi"
+        else:
+            lang = "Simple English"
 
         row = [
             vid,
@@ -1452,6 +1543,8 @@ def _build_csv_rows(videos: list[dict]) -> str:
             v.get("error_code", ""),
             v.get("error_message", "") or v.get("error", ""),
         ]
+        if include_audit_columns:
+            row.extend([out_mode, source_lang, source_code])
         writer.writerow(row)
 
     return output.getvalue()
@@ -1600,9 +1693,12 @@ async def api_transcript_csv_export(req: TranscriptExportRequest):
                                 "published_at": published_at,
                                 "duration_seconds": dur_sec,
                                 "duration": dur_str,
-                                "language": transcript.language or "English (India)",
+                                "language": transcript.source_language or transcript.language or ("Hindi" if english_converter.contains_non_roman_script(transcript.raw_transcript or transcript.plain_text) else "English"),
+                                "source_language": transcript.source_language or ("Hindi" if english_converter.contains_non_roman_script(transcript.raw_transcript or transcript.plain_text) else "English"),
+                                "source_language_code": transcript.source_language_code or ("hi" if english_converter.contains_non_roman_script(transcript.raw_transcript or transcript.plain_text) else "en"),
                                 "status": "success",
-                                "transcript": transcript.plain_text or transcript.paragraph_text or "",
+                                "transcript": transcript.raw_transcript if req.output_language in ("original", "original_spoken") else (transcript.plain_text or transcript.paragraph_text or ""),
+                                "raw_transcript": transcript.raw_transcript or transcript.plain_text or "",
                                 "source": src,
                                 "method": mth,
                                 "error_code": None,
@@ -1700,13 +1796,26 @@ async def api_transcript_csv_export(req: TranscriptExportRequest):
                     allow_whisper=settings.whisper_enabled,
                     video_title=title,
                     channel_title=channel_title,
+                    output_format=req.output_language,
                 )
-                if transcript and transcript.success and (transcript.plain_text or transcript.paragraph_text):
-                    transcript_text = transcript.plain_text or transcript.paragraph_text or ""
+                if transcript and transcript.success and (transcript.plain_text or transcript.paragraph_text or getattr(transcript, "raw_transcript", None)):
+                    raw_text = getattr(transcript, "raw_transcript", "") or transcript.plain_text or transcript.paragraph_text or ""
                     status = "success"
                     source = getattr(transcript.source, "value", str(transcript.source)) if transcript.source else "youtube"
                     method = getattr(transcript, "method", None) or ("speech_to_text" if source == "whisper" else "caption")
-                    language = transcript.language or "English (India)"
+                    is_hindi_vid = english_converter.contains_non_roman_script(raw_text) or str(transcript.language).lower() in ("hi", "hindi")
+                    source_lang = transcript.source_language or ("Hindi" if is_hindi_vid else "English")
+                    source_code = transcript.source_language_code or ("hi" if is_hindi_vid else "en")
+
+                    if req.output_language in ("original", "original_spoken"):
+                        transcript_text = raw_text
+                        language = source_lang
+                    elif req.output_language == "hi":
+                        transcript_text = getattr(transcript, "simple_hindi_transcript", None) or raw_text
+                        language = "Simple Hindi"
+                    else:
+                        transcript_text = getattr(transcript, "simple_english_transcript", None) or transcript.plain_text or raw_text
+                        language = "Simple English"
                 else:
                     error_code = getattr(transcript, "error_code", None) or "NO_CAPTIONS"
                     error_message = getattr(transcript, "error", None) or "No captions available"
@@ -1714,6 +1823,17 @@ async def api_transcript_csv_export(req: TranscriptExportRequest):
                 logger.warning("[%s] Transcript fetch failed for %s: %s", rid, video_id, exc)
                 error_code = "EXTRACTION_ERROR"
                 error_message = str(exc)
+
+            # If Simple English is explicitly requested, check for cached translation
+            if req.output_language == "en" and status == "success" and transcript_text:
+                try:
+                    _, trans_svc = _get_unified_services()
+                    cached_trans = trans_svc.repository.get_translation(video_id, "en:simple")
+                    if cached_trans and cached_trans.plain_text:
+                        transcript_text = cached_trans.plain_text
+                        language = "Simple English"
+                except Exception:
+                    pass
 
             videos_data = [{
                 "video_id": video_id,
@@ -1725,8 +1845,11 @@ async def api_transcript_csv_export(req: TranscriptExportRequest):
                 "duration_seconds": duration_seconds,
                 "duration": duration,
                 "language": language,
+                "source_language": source_lang if 'source_lang' in locals() else language,
+                "source_language_code": source_code if 'source_code' in locals() else "en",
                 "status": status,
                 "transcript": transcript_text,
+                "raw_transcript": getattr(transcript, "raw_transcript", "") if transcript else "",
                 "source": source,
                 "method": method,
                 "error_code": error_code,
@@ -1736,7 +1859,11 @@ async def api_transcript_csv_export(req: TranscriptExportRequest):
             logger.info("[%s] CSV export: 1 row for video %s", rid, video_id)
 
         # Generate CSV
-        csv_content = _build_csv_rows(videos_data)
+        csv_content = _build_csv_rows(
+            videos_data,
+            output_language=req.output_language,
+            include_audit_columns=req.include_audit_columns,
+        )
         elapsed = round(time.time() - start_time, 2)
         logger.info("[%s] CSV export complete: %d rows, %d bytes, %.2fs elapsed",
                     rid, len(videos_data), len(csv_content.encode("utf-8")), elapsed)

@@ -108,7 +108,7 @@ class TestTranscriptPipelineHinglishIntegration:
             character_count=len(raw_text),
         )
 
-        finalized = service._finalize(transcript, [], 0.0)
+        finalized = service._finalize(transcript, [], 0.0, output_format="hinglish")
 
         assert finalized.language in ("English (India)", "Hinglish")
         assert finalized.raw_transcript == raw_text

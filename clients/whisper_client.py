@@ -8,6 +8,7 @@ import os
 import time
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from interfaces.speech_to_text import (
     SpeechToTextClient,

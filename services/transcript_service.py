@@ -91,7 +91,15 @@ class TranscriptService:
         self._manual_provider = manual_provider or ManualTranscriptProvider()
         self._auto_provider = auto_provider or AutoTranscriptProvider()
         self._whisper_provider = whisper_provider
-        self._repository = repository or TranscriptRepository()
+        if repository is not None:
+            self._repository = repository
+        else:
+            try:
+                from config.settings import settings
+                p_dir = str(getattr(settings, "transcript_cache_dir", "data/transcripts"))
+            except Exception:
+                p_dir = "data/transcripts"
+            self._repository = TranscriptRepository(persist_dir=p_dir)
         self._text_cleaner = text_cleaner or TextCleaner()
         self._use_cache = use_cache
 
@@ -109,6 +117,7 @@ class TranscriptService:
         allow_whisper: bool = True,
         video_title: str | None = None,
         channel_title: str | None = None,
+        output_format: str = "original",
     ) -> TranscriptResult:
         """Retrieve the best available transcript for a video.
 
@@ -124,6 +133,7 @@ class TranscriptService:
             allow_whisper: If False, skip Stage 3 (Whisper fallback).
             video_title: Optional video title for domain entity biasing.
             channel_title: Optional channel name for series/channel biasing.
+            output_format: 'original' (canonical source) | 'en' | 'hi'
 
         Returns:
             ``TranscriptResult`` with transcript data and pipeline metadata.
@@ -148,14 +158,23 @@ class TranscriptService:
                     for s in (cached.pipeline_steps or [])
                 ):
                     logger.info("Ignoring cached caption failure for %s because allow_whisper=True and Whisper not yet attempted", video_id)
-                elif cached.success and allow_whisper and (
+                elif cached.success and allow_whisper and output_format != "original" and (
                     str(cached.language).lower() in ("hi", "hindi", "ur", "urdu", "hinglish")
                     or english_converter.contains_non_roman_script(cached.plain_text or "")
                     or (cached.source != TranscriptSource.WHISPER and hinglish_normalizer.is_hinglish_or_hindi(cached.plain_text or ""))
                 ):
-                    logger.info("Ignoring cached non-English caption for %s because allow_whisper=True", video_id)
+                    logger.info("Ignoring cached non-English caption for %s because allow_whisper=True and output_format != 'original'", video_id)
                 else:
                     logger.info("Returning cached transcript for %s (source=%s)", video_id, cached.source)
+                    # Canonical healing: If Original Spoken requested and raw_transcript exists, ensure authentic verbatim text
+                    if output_format in ("original", "original_spoken") and getattr(cached, "raw_transcript", None):
+                        cached.plain_text = cached.raw_transcript
+                        if getattr(cached, "source_language", None):
+                            cached.language = cached.source_language
+                        elif english_converter.contains_non_roman_script(cached.raw_transcript):
+                            cached.language = "Hindi"
+                            cached.source_language = "Hindi"
+                            cached.source_language_code = "hi"
                     return cached
 
         # Stage 1: Manual transcript (NEVER throws - trapped as skipped)
@@ -169,16 +188,36 @@ class TranscriptService:
             channel_title=channel_title,
         )
 
-        # Stage 2: Auto transcript
-        step_auto = self._execute_stage(
-            "Auto Transcript",
-            video_id,
-            language,
-            self._auto_provider,
-            pipeline_steps,
-            video_title=video_title,
-            channel_title=channel_title,
+        is_rate_limited = (
+            step_manual is not None
+            and step_manual.get("error_type") == "RATE_LIMITED"
         )
+
+        # Stage 2: Auto transcript (SKIP if Stage 1 was RATE_LIMITED to protect YouTube IP)
+        if is_rate_limited:
+            logger.warning(
+                "Manual transcript hit RATE_LIMITED for %s. Skipping Auto transcript to prevent request storm.",
+                video_id,
+            )
+            step_auto = None
+            pipeline_steps.append({
+                "name": "Auto Transcript",
+                "status": "skipped",
+                "detail": "Skipped due to YouTube rate limiting",
+                "error_type": "RATE_LIMITED",
+            })
+        else:
+            step_auto = self._execute_stage(
+                "Auto Transcript",
+                video_id,
+                language,
+                self._auto_provider,
+                pipeline_steps,
+                video_title=video_title,
+                channel_title=channel_title,
+            )
+            if step_auto and step_auto.get("error_type") == "RATE_LIMITED":
+                is_rate_limited = True
 
         # Determine best result - prefer manual over auto
         best_step = None
@@ -190,8 +229,8 @@ class TranscriptService:
             logger.debug("Using AUTO transcript for %s (manual unavailable)", video_id)
 
         # If caption candidate is in Hindi/non-English and allow_whisper is True,
-        # fallback to Whisper STT to obtain direct natural English!
-        if best_step and allow_whisper:
+        # fallback to Whisper STT ONLY IF output_format is not 'original'
+        if best_step and allow_whisper and output_format not in ("original", "original_spoken"):
             cand_res = best_step.get("result")
             if cand_res:
                 cand_lang = (getattr(cand_res, "language", "") or "").lower()
@@ -201,12 +240,12 @@ class TranscriptService:
                     best_step = None
 
         if best_step:
-            result = self._finalize(best_step["result"], pipeline_steps, start_time, video_title=video_title, channel_title=channel_title)
+            result = self._finalize(best_step["result"], pipeline_steps, start_time, video_title=video_title, channel_title=channel_title, output_format=output_format)
             self._repository.save(result)
             return result
 
-        # Stage 3: Whisper (only if both manual AND auto failed)
-        if allow_whisper:
+        # Stage 3: Whisper (only if both manual AND auto failed, and NOT in rate limit)
+        if allow_whisper and not is_rate_limited:
             try:
                 whisper_provider = self._get_whisper_provider()
             except ImportError as exc:
@@ -230,9 +269,16 @@ class TranscriptService:
             else:
                 step_whisper = None
             if step_whisper and step_whisper.get("status") == "ok":
-                result = self._finalize(step_whisper["result"], pipeline_steps, start_time, video_title=video_title, channel_title=channel_title)
+                result = self._finalize(step_whisper["result"], pipeline_steps, start_time, video_title=video_title, channel_title=channel_title, output_format=output_format)
                 self._repository.save(result)
                 return result
+        elif allow_whisper and is_rate_limited:
+            pipeline_steps.append({
+                "name": "Whisper STT",
+                "status": "skipped",
+                "detail": "Skipped to avoid secondary requests during YouTube rate limit cooldown",
+                "error_type": "RATE_LIMITED",
+            })
 
         # All stages failed
         pipeline_steps.append({
@@ -425,6 +471,11 @@ class TranscriptService:
             except TypeError:
                 transcript = provider.get_transcript(video_id, language=language)
             if transcript.success and transcript.segments:
+                try:
+                    from transcript_reliability.transcript_limiter import transcript_limiter
+                    transcript_limiter.record_success(video_id)
+                except Exception:
+                    pass
                 step["status"] = "ok"
                 step["detail"] = f"{transcript.source.value} ({transcript.language}, {transcript.word_count} words)"
                 step["result"] = transcript
@@ -443,7 +494,12 @@ class TranscriptService:
                 step["error_type"] = "CAPTIONS_DISABLED"
                 return step
 
-            if isinstance(exc, (ClientTooManyRequestsError,)):
+            if isinstance(exc, (ClientTooManyRequestsError,)) or "rate limit" in str(exc).lower() or "too many requests" in str(exc).lower() or "429" in str(exc):
+                try:
+                    from transcript_reliability.transcript_limiter import transcript_limiter
+                    transcript_limiter.record_rate_limit(video_id)
+                except Exception:
+                    pass
                 step["status"] = "skipped"
                 step["detail"] = str(exc)
                 step["error_type"] = "RATE_LIMITED"
@@ -486,32 +542,60 @@ class TranscriptService:
         start_time: float,
         video_title: str | None = None,
         channel_title: str | None = None,
+        output_format: str = "original",
     ) -> TranscriptResult:
-        """Finalize transcript result with pipeline metadata and Hinglish normalization."""
+        """Finalize transcript result with pipeline metadata and strict canonical preservation."""
         elapsed = round(time.time() - start_time, 2)
 
         raw_text = transcript.plain_text or transcript.paragraph_text or ""
         if not getattr(transcript, "raw_transcript", None):
             transcript.raw_transcript = raw_text
 
-        # Detect if transcript has Devanagari or Urdu script, or is Hindi/Urdu/Hinglish, or is from Whisper
+        # Detect source language accurately
         lang_lower = (transcript.language or "").lower()
-        if (
+        is_hindi = (
             lang_lower in ("hi", "ur", "hindi", "urdu", "hinglish")
             or english_converter.contains_non_roman_script(raw_text)
             or hinglish_normalizer.is_hinglish_or_hindi(raw_text)
-            or transcript.source == TranscriptSource.WHISPER
-        ):
-            if transcript.segments:
-                english_converter.convert_segments(transcript.segments, title=video_title, channel=channel_title)
-            if transcript.plain_text:
-                transcript.plain_text = english_converter.convert(transcript.plain_text, title=video_title, channel=channel_title)
-            if transcript.paragraph_text:
-                transcript.paragraph_text = self._text_cleaner.build_paragraphs(transcript.segments) if transcript.segments else english_converter.convert(transcript.paragraph_text, title=video_title, channel=channel_title)
-            transcript.language = "English (India)"
+        )
+
+        # Document canonical source language metadata
+        if not getattr(transcript, "source_language", None):
+            if is_hindi:
+                transcript.source_language = "Hindi"
+                transcript.source_language_code = "hi"
+            elif lang_lower.startswith("en"):
+                transcript.source_language = "English"
+                transcript.source_language_code = "en"
+            else:
+                transcript.source_language = transcript.language or "Unknown"
+                transcript.source_language_code = lang_lower or "auto"
+
+        transcript.output_format = output_format
+
+        # In Original Spoken mode, strictly preserve authentic verbatim source representation
+        if output_format in ("original", "original_spoken"):
+            transcript.plain_text = transcript.raw_transcript
+            transcript.language = transcript.source_language or ("Hindi" if is_hindi else transcript.language)
             transcript.word_count = len(transcript.plain_text.split()) if transcript.plain_text else 0
             transcript.character_count = len(transcript.plain_text) if transcript.plain_text else 0
             transcript.estimated_read_time = estimate_read_time(transcript.word_count)
+        else:
+            # Transliteration or conversion requested for non-original mode
+            if (
+                is_hindi
+                or transcript.source == TranscriptSource.WHISPER
+            ):
+                if transcript.segments:
+                    english_converter.convert_segments(transcript.segments, title=video_title, channel=channel_title)
+                if transcript.plain_text:
+                    transcript.plain_text = english_converter.convert(transcript.plain_text, title=video_title, channel=channel_title)
+                if transcript.paragraph_text:
+                    transcript.paragraph_text = self._text_cleaner.build_paragraphs(transcript.segments) if transcript.segments else english_converter.convert(transcript.paragraph_text, title=video_title, channel=channel_title)
+                transcript.language = "English (India)"
+                transcript.word_count = len(transcript.plain_text.split()) if transcript.plain_text else 0
+                transcript.character_count = len(transcript.plain_text) if transcript.plain_text else 0
+                transcript.estimated_read_time = estimate_read_time(transcript.word_count)
 
         pipeline_steps.append({
             "name": "Cleaning Transcript",

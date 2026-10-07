@@ -301,13 +301,16 @@ export interface ChannelVideoTranscriptSimple {
   duration: string;
   language?: string;
   script?: string;
-  status?: 'success' | 'failed' | 'processing' | 'pending';
+  status?: 'success' | 'failed' | 'processing' | 'pending' | 'rate_limited' | 'no_captions' | 'temporary_error';
   transcript: string;
   raw_transcript?: string;
   source?: string | null;
   method?: string | null;
   error_code?: string | null;
   error_message?: string | null;
+  retryable?: boolean;
+  attempt_count?: number;
+  next_retry_at?: string | null;
 }
 
 export interface ChannelTranscriptSimpleResponse {
@@ -332,7 +335,7 @@ export interface TranscriptJobProgressData {
   channel_handle: string;
   channel_id: string;
   channel_title: string;
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'queued' | 'running' | 'cooldown' | 'paused' | 'completed' | 'failed' | 'cancelled';
   total_discovered: number;
   eligible_videos: number;
   skipped_videos: number;
@@ -341,9 +344,15 @@ export interface TranscriptJobProgressData {
   caption_count: number;
   whisper_count: number;
   no_captions: number;
+  rate_limited: number;
   failed: number;
   remaining: number;
   progress_percent: number;
+  cooldown_seconds_remaining?: number;
+  checkpoint_file?: string | null;
+  published_after?: string | null;
+  published_before?: string | null;
+  output_language?: string;
   created_at: string;
   updated_at: string;
   completed_at?: string | null;
@@ -502,6 +511,9 @@ export interface UnifiedTranscriptResponse {
   output_language: OutputLanguage;
   provider: string;
   transcript: string;
+  raw_transcript?: string;
+  raw_segments?: UnifiedTranscriptSegment[];
+  fallback_to_original?: boolean;
   segments: UnifiedTranscriptSegment[];
   word_count: number;
   duration_seconds?: number | null;

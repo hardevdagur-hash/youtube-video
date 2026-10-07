@@ -102,11 +102,11 @@ def _build_transcript_session() -> requests.Session:
     session = requests.Session()
 
     retry_strategy = Retry(
-        total=3,
-        read=3,
-        connect=3,
+        total=2,
+        read=2,
+        connect=2,
         backoff_factor=1.0,
-        status_forcelist=[429, 500, 502, 503, 504],
+        status_forcelist=[500, 502, 503, 504],
         allowed_methods=frozenset({"HEAD", "GET", "POST", "PUT", "DELETE", "OPTIONS", "TRACE"}),
         raise_on_status=False,
     )
@@ -250,7 +250,8 @@ class YouTubeTranscriptClient:
             raise
         except Exception as exc:
             exc_name = type(exc).__name__
-            if "TooManyRequests" in exc_name:
+            exc_msg = str(exc).lower()
+            if "toomanyrequests" in exc_name.lower() or "429" in exc_msg or "too many requests" in exc_msg or "rate limit" in exc_msg:
                 raise TooManyRequestsError("Rate limited by YouTube.")
             raise YouTubeTranscriptClientError(f"Failed to list transcripts: {exc}")
 
@@ -364,44 +365,27 @@ class YouTubeTranscriptClient:
         candidates: list[Any],
         langs: list[str],
     ) -> tuple[list[dict[str, Any]], str, bool, str | None]:
-        """Select best manually-created transcript only."""
+        """Select best manually-created transcript only, prioritizing original language."""
 
-        # Priority M1: Manual English (exact)
-        for t in candidates:
-            if not t.is_generated and t.language_code == "en":
-                _log_transcript_candidate(t, "ACCEPTED",
-                                          "Priority M1: manual English")
-                return self._to_dicts(t.fetch()), "en", True, None
-
-        # Priority M2: Manual English variant
-        for lang in ["en-US", "en-GB", "en-IN"]:
+        # Priority M1: Manual in preferred languages (exact/prefix match, native)
+        for lang in langs:
             for t in candidates:
-                if not t.is_generated and t.language_code == lang:
-                    _log_transcript_candidate(t, "ACCEPTED",
-                                              f"Priority M2: manual {lang}")
-                    return self._to_dicts(t.fetch()), lang, True, None
+                if not t.is_generated and (t.language_code == lang or t.language_code.startswith(lang)):
+                    _log_transcript_candidate(t, "ACCEPTED", f"Priority M1: manual {lang}")
+                    return self._to_dicts(t.fetch()), t.language_code, True, None
 
-        # Priority M3: Manual translatable to English
-        for t in candidates:
-            if not t.is_generated and t.is_translatable:
-                _log_transcript_candidate(t, "ACCEPTED",
-                                          "Priority M3: manual translatable to en")
-                translated = t.translate("en")
-                return self._to_dicts(translated.fetch()), "en", True, t.language_code
-
-        # Priority M4: Manual Hindi (only if English translation is not available)
-        for t in candidates:
-            if not t.is_generated and t.language_code == "hi":
-                _log_transcript_candidate(t, "ACCEPTED",
-                                          "Priority M4: manual Hindi")
-                return self._to_dicts(t.fetch()), "hi", True, None
-
-        # Priority M5: Any manual transcript (last resort)
+        # Priority M2: Any manual transcript in original native language
         for t in candidates:
             if not t.is_generated:
-                _log_transcript_candidate(t, "ACCEPTED",
-                                          "Priority M5: any manual transcript")
+                _log_transcript_candidate(t, "ACCEPTED", f"Priority M2: manual native ({t.language_code})")
                 return self._to_dicts(t.fetch()), t.language_code, True, None
+
+        # Priority M3: Manual translatable to English (last resort fallback)
+        for t in candidates:
+            if not t.is_generated and t.is_translatable:
+                _log_transcript_candidate(t, "ACCEPTED", "Priority M3: manual translatable to en (last resort)")
+                translated = t.translate("en")
+                return self._to_dicts(translated.fetch()), "en", True, t.language_code
 
         names = ", ".join(f"{t.language}({t.language_code})" for t in candidates)
         raise NoTranscriptFoundError(
@@ -413,29 +397,27 @@ class YouTubeTranscriptClient:
         candidates: list[Any],
         langs: list[str],
     ) -> tuple[list[dict[str, Any]], str, bool, str | None]:
-        """Select best auto-generated transcript only."""
+        """Select best auto-generated transcript only, prioritizing original language."""
 
-        # Priority A1: Auto English
-        for t in candidates:
-            if t.is_generated and t.language_code.startswith("en"):
-                _log_transcript_candidate(t, "ACCEPTED",
-                                          "Priority A1: auto English")
-                return self._to_dicts(t.fetch()), t.language_code, False, None
+        # Priority A1: Auto in preferred languages (exact/prefix match, native)
+        for lang in langs:
+            for t in candidates:
+                if t.is_generated and (t.language_code == lang or t.language_code.startswith(lang)):
+                    _log_transcript_candidate(t, "ACCEPTED", f"Priority A1: auto {lang}")
+                    return self._to_dicts(t.fetch()), t.language_code, False, None
 
-        # Priority A2: Auto translatable to English
-        for t in candidates:
-            if t.is_generated and t.is_translatable:
-                _log_transcript_candidate(t, "ACCEPTED",
-                                          "Priority A2: auto translatable to en")
-                translated = t.translate("en")
-                return self._to_dicts(translated.fetch()), "en", False, t.language_code
-
-        # Priority A3: Any auto transcript (last resort)
+        # Priority A2: Any auto transcript in original native language
         for t in candidates:
             if t.is_generated:
-                _log_transcript_candidate(t, "ACCEPTED",
-                                          "Priority A3: any auto transcript")
+                _log_transcript_candidate(t, "ACCEPTED", f"Priority A2: auto native ({t.language_code})")
                 return self._to_dicts(t.fetch()), t.language_code, False, None
+
+        # Priority A3: Auto translatable to English (last resort fallback)
+        for t in candidates:
+            if t.is_generated and t.is_translatable:
+                _log_transcript_candidate(t, "ACCEPTED", "Priority A3: auto translatable to en (last resort)")
+                translated = t.translate("en")
+                return self._to_dicts(translated.fetch()), "en", False, t.language_code
 
         names = ", ".join(f"{t.language}({t.language_code})" for t in candidates)
         raise NoTranscriptFoundError(
@@ -447,64 +429,38 @@ class YouTubeTranscriptClient:
         candidates: list[Any],
         langs: list[str],
     ) -> tuple[list[dict[str, Any]], str, bool, str | None]:
-        """Select best transcript of any type (manual preferred)."""
+        """Select best transcript of any type, preserving original source representation."""
 
-        # Priority 1: Manual English (exact "en" match)
-        for t in candidates:
-            if not t.is_generated and t.language_code == "en":
-                _log_transcript_candidate(t, "ACCEPTED",
-                                          "Priority 1: manual English (exact match)")
-                return self._to_dicts(t.fetch()), "en", True, None
-
-        # Priority 2: Manual English variant
-        for lang in ["en-US", "en-GB", "en-IN"]:
+        # Priority 1: Manual in preferred languages (native)
+        for lang in langs:
             for t in candidates:
-                if not t.is_generated and t.language_code == lang:
-                    _log_transcript_candidate(t, "ACCEPTED",
-                                              f"Priority 2: manual English variant ({lang})")
-                    return self._to_dicts(t.fetch()), lang, True, None
+                if not t.is_generated and (t.language_code == lang or t.language_code.startswith(lang)):
+                    _log_transcript_candidate(t, "ACCEPTED", f"Priority 1: manual {lang}")
+                    return self._to_dicts(t.fetch()), t.language_code, True, None
 
-        # Priority 3: Auto-generated English
+        # Priority 2: Any manual transcript in native language
         for t in candidates:
-            if t.is_generated and t.language_code.startswith("en"):
-                _log_transcript_candidate(t, "ACCEPTED",
-                                          "Priority 3: auto-generated English")
+            if not t.is_generated:
+                _log_transcript_candidate(t, "ACCEPTED", f"Priority 2: manual native ({t.language_code})")
+                return self._to_dicts(t.fetch()), t.language_code, True, None
+
+        # Priority 3: Auto-generated in preferred languages (native)
+        for lang in langs:
+            for t in candidates:
+                if t.is_generated and (t.language_code == lang or t.language_code.startswith(lang)):
+                    _log_transcript_candidate(t, "ACCEPTED", f"Priority 3: auto {lang}")
+                    return self._to_dicts(t.fetch()), t.language_code, False, None
+
+        # Priority 4: Any auto-generated in native language
+        for t in candidates:
+            if t.is_generated:
+                _log_transcript_candidate(t, "ACCEPTED", f"Priority 4: auto native ({t.language_code})")
                 return self._to_dicts(t.fetch()), t.language_code, False, None
 
-        # Priority 4: Manual translatable to English
-        for t in candidates:
-            if not t.is_generated and t.is_translatable:
-                _log_transcript_candidate(t, "ACCEPTED",
-                                          "Priority 4: manual translatable to en")
-                translated = t.translate("en")
-                return self._to_dicts(translated.fetch()), "en", True, t.language_code
-
-        # Priority 5: Auto translatable to English
-        for t in candidates:
-            if t.is_generated and t.is_translatable:
-                _log_transcript_candidate(t, "ACCEPTED",
-                                          "Priority 5: auto translatable to en")
-                translated = t.translate("en")
-                return self._to_dicts(translated.fetch()), "en", False, t.language_code
-
-        # Priority 6: Manual Hindi (only if English translation is not available)
-        for t in candidates:
-            if not t.is_generated and t.language_code == "hi":
-                _log_transcript_candidate(t, "ACCEPTED",
-                                          "Priority 6: manual Hindi")
-                return self._to_dicts(t.fetch()), "hi", True, None
-
-        # Priority 7: Best available (any language, any type)
-        for t in candidates:
-            _log_transcript_candidate(t, "ACCEPTED",
-                                      "Priority 7: best available (last resort)")
-            return self._to_dicts(t.fetch()), t.language_code, not t.is_generated, None
-
-        # Priority 8: Translatable (last resort)
+        # Priority 5: Machine-translatable to English (absolute last resort)
         for t in candidates:
             if t.is_translatable:
-                _log_transcript_candidate(t, "ACCEPTED",
-                                          "Priority 8: translatable to en (last resort)")
+                _log_transcript_candidate(t, "ACCEPTED", "Priority 5: translatable to en (last resort)")
                 translated = t.translate("en")
                 return self._to_dicts(translated.fetch()), "en", not t.is_generated, t.language_code
 

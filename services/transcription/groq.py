@@ -57,7 +57,7 @@ class GroqWhisperProvider(TranscriptionProvider):
         max_retries: Optional[int] = None,
     ) -> None:
         settings = get_settings()
-        self.api_key = api_key or getattr(settings, "groq_api_key", "")
+        self.api_key = api_key if api_key is not None else getattr(settings, "groq_api_key", "")
         self.model = model or getattr(settings, "groq_whisper_model", "whisper-large-v3")
         self.timeout = timeout or getattr(settings, "groq_timeout_seconds", 120)
         self.max_retries = max_retries or getattr(settings, "groq_max_retries", 3)

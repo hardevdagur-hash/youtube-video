@@ -89,10 +89,10 @@ class TranscriptService {
     return this.translationCache.get(`${videoId}:${targetLang}`);
   }
 
-  // Unified Production Transcript Endpoint — Captions first -> Groq Whisper Large V3 fallback -> Translation
+  // Unified Production Transcript Endpoint — Captions first -> Groq Whisper Large V3 fallback -> Simple English Default
   async fetchUnifiedTranscript(
     videoUrl: string,
-    outputLanguage: OutputLanguage = 'original'
+    outputLanguage: OutputLanguage = 'en'
   ): Promise<UnifiedTranscriptResponse> {
     console.log(`[TranscriptService] Fetching unified transcript for ${videoUrl} (lang=${outputLanguage})`);
     const resp = await fetch(`${API_BASE}/transcript`, {
@@ -148,12 +148,21 @@ class TranscriptService {
     handle: string,
     maxVideos: number = 0,
     forceRefresh: boolean = false,
+    publishedAfter?: string | null,
+    publishedBefore?: string | null,
+    outputLanguage: string = 'en',
   ): Promise<TranscriptJobProgressData> {
     console.log(`[TranscriptService] Starting background transcript job: ${handle}`);
     const resp = await fetch(`${API_BASE}/channel/${encodeURIComponent(handle)}/transcript-job`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ max_videos: maxVideos, force_refresh: forceRefresh }),
+      body: JSON.stringify({
+        max_videos: maxVideos,
+        force_refresh: forceRefresh,
+        published_after: publishedAfter || null,
+        published_before: publishedBefore || null,
+        output_language: outputLanguage || 'en',
+      }),
     });
     if (!resp.ok) {
       const body = await resp.json().catch(() => null);
@@ -183,6 +192,20 @@ class TranscriptService {
       const body = await resp.json().catch(() => null);
       throw new Error(body?.message || `Failed to cancel job (${resp.status})`);
     }
+  }
+
+  async resumeJob(jobId: string): Promise<TranscriptJobProgressData> {
+    const resp = await fetch(`${API_BASE}/transcript/jobs/${encodeURIComponent(jobId)}/resume`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => null);
+      throw new Error(body?.message || `Failed to resume job (${resp.status})`);
+    }
+    const body = await resp.json();
+    return body.data;
   }
 
   getJobDownloadUrl(jobId: string): string {
