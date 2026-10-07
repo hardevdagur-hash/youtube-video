@@ -1,227 +1,127 @@
-#!/bin/bash
-set -euo pipefail
+#!/usr/bin/env bash
+# Build and (re)deploy the single-instance stack, then verify it; on failure the
+# previously deployed image is started again automatically.
+#
+#   scripts/deploy.sh             build from the current checkout and deploy
+#   SKIP_BACKUP=1 scripts/deploy.sh   skip the pre-deploy data backup
+#
+# Requires: docker with the compose plugin, ./.env, docker/nginx/certs/*.pem.
+set -Eeuo pipefail
 
-ENVIRONMENT="${1:-staging}"
-VERSION="${2:-latest}"
-COMPOSE_FILE="docker/docker-compose.yml"
-PROJECT_DIR="/opt/youtube-export-platform"
-BACKUP_DIR="${PROJECT_DIR}/backups"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-DEPLOY_LOG="${PROJECT_DIR}/logs/deploy-${TIMESTAMP}.log"
+cd "$(dirname "$0")/.."
+STATE_DIR=".deploy"
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"
 
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "${DEPLOY_LOG}"
+log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+die() { log "ERROR: $*" >&2; exit 1; }
+
+env_value() {
+    # Value of KEY in .env without sourcing it (never executes .env content).
+    grep -E "^[[:space:]]*$1=" .env | tail -n 1 | cut -d= -f2- | sed -e 's/^["'\'']//' -e 's/["'\'']$//'
 }
 
-error_exit() {
-    log "ERROR: $1"
-    exit 1
-}
+preflight() {
+    command -v docker >/dev/null || die "docker is not installed"
+    docker compose version >/dev/null 2>&1 || die "the docker compose plugin is not installed"
+    docker info >/dev/null 2>&1 || die "the docker daemon is not reachable"
+    [ -f .env ] || die ".env not found: copy .env.example to .env and fill it in (see README)"
 
-# Pre-deployment checks
-pre_checks() {
-    log "Running pre-deployment checks..."
-    
-    # Check disk space
-    AVAILABLE=$(df / | awk 'NR==2 {print $4}')
-    if [ "${AVAILABLE}" -lt 5242880 ]; then
-        error_exit "Insufficient disk space: ${AVAILABLE}KB available, need 5GB"
+    local missing=()
+    for key in JWT_SECRET_KEY YOUTUBE_API_KEY; do
+        [ -n "$(env_value "$key")" ] || missing+=("$key")
+    done
+    if [ -z "$(env_value AUTH_USERS)" ] && [ -z "$(env_value API_KEYS)" ]; then
+        missing+=("AUTH_USERS or API_KEYS")
     fi
-    
-    # Check Docker
-    docker info > /dev/null 2>&1 || error_exit "Docker not running"
-    
-    # Check Docker Compose
-    docker compose version > /dev/null 2>&1 || error_exit "Docker Compose not available"
-    
-    # Check if deployed already
-    if [ -f "${PROJECT_DIR}/.deployed" ]; then
-        log "Previous deployment exists: $(cat ${PROJECT_DIR}/.deployed)"
-    fi
-    
-    log "Pre-deployment checks passed"
+    [ ${#missing[@]} -eq 0 ] || die "missing required settings in .env: ${missing[*]}"
+    [ -n "$(env_value GROQ_API_KEY)" ] \
+        || log "WARNING: GROQ_API_KEY is empty: speech-to-text fallback and translation are disabled"
+
+    [ -s docker/nginx/certs/fullchain.pem ] && [ -s docker/nginx/certs/privkey.pem ] \
+        || die "TLS certificate missing: run 'scripts/init-tls.sh self-signed <host>' (bootstrap) or 'scripts/init-tls.sh letsencrypt <domain> <email>'"
+
+    local free_kb
+    free_kb="$(df -Pk . | awk 'NR==2 {print $4}')"
+    [ "${free_kb:-0}" -ge 2097152 ] || die "less than 2 GB free disk space"
 }
 
-# Backup current state
-backup_current() {
-    log "Creating pre-deployment backup..."
-    
-    mkdir -p "${BACKUP_DIR}"
-    
-    # Backup database
-    docker compose -f "${COMPOSE_FILE}" exec -T postgres \
-        pg_dump -U "${DB_USER:-ytplatform}" "${DB_NAME:-yt_platform}" > \
-        "${BACKUP_DIR}/db-${TIMESTAMP}.sql" || log "WARNING: Database backup failed"
-    
-    # Backup .env
-    cp "${PROJECT_DIR}/.env" "${BACKUP_DIR}/env-${TIMESTAMP}.backup" || true
-    
-    # Backup Docker Compose
-    cp "${COMPOSE_FILE}" "${BACKUP_DIR}/docker-compose-${TIMESTAMP}.backup" || true
-    
-    # Keep only last 7 backups
-    ls -t "${BACKUP_DIR}"/db-*.sql 2>/dev/null | tail -n +8 | xargs -r rm
-    ls -t "${BACKUP_DIR}"/env-*.backup 2>/dev/null | tail -n +8 | xargs -r rm
-    
-    log "Backup completed: ${BACKUP_DIR}"
+image_tag() {
+    local tag
+    tag="$(git rev-parse --short=12 HEAD 2>/dev/null || date -u +%Y%m%d%H%M%S)"
+    if git rev-parse --git-dir >/dev/null 2>&1 && [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+        tag="${tag}-dirty-$(date -u +%Y%m%d%H%M%S)"
+    fi
+    printf '%s' "$tag"
 }
 
-# Deploy new version
-deploy_version() {
-    log "Deploying version: ${VERSION} to ${ENVIRONMENT}"
-    
-    # Pull latest images
-    export IMAGE_TAG="${VERSION}"
-    docker compose -f "${COMPOSE_FILE}" pull || \
-        error_exit "Failed to pull images"
-    
-    # Blue-green deployment
-    if [ "${ENVIRONMENT}" = "production" ]; then
-        deploy_blue_green
-    else
-        deploy_rolling
-    fi
-    
-    log "Deployment completed"
-}
-
-# Rolling deployment
-deploy_rolling() {
-    log "Performing rolling update..."
-    
-    # Start new containers with rolling update
-    docker compose -f "${COMPOSE_FILE}" up -d --remove-orphans --no-deps api worker 2>&1 | tee -a "${DEPLOY_LOG}"
-    
-    # Wait for stability
-    log "Waiting for services to stabilize..."
-    sleep 15
-    
-    # Health check
-    if ! health_check; then
-        log "Rolling update failed - initiating rollback"
-        rollback
-        error_exit "Rolling update failed, rolled back"
-    fi
-}
-
-# Blue-green deployment
-deploy_blue_green() {
-    log "Performing blue-green deployment..."
-    
-    local COLOR="blue"
-    if docker compose -f "${COMPOSE_FILE}" ps api-green 2>/dev/null | grep -q "Up"; then
-        COLOR="blue"
-        NEW_COLOR="green"
-    else
-        COLOR="green"
-        NEW_COLOR="blue"
-    fi
-    
-    log "Current: ${COLOR}, Deploying: ${NEW_COLOR}"
-    
-    # Start new stack
-    COLOR="${NEW_COLOR}" docker compose -f "${COMPOSE_FILE}" up -d api-${NEW_COLOR} worker-${NEW_COLOR} 2>&1 | tee -a "${DEPLOY_LOG}"
-    
-    # Wait for new stack
-    log "Waiting for new stack to be ready..."
-    sleep 30
-    
-    # Health check new stack
-    if ! health_check; then
-        log "New stack health check failed - rolling back"
-        docker compose -f "${COMPOSE_FILE}" stop api-${NEW_COLOR} worker-${NEW_COLOR}
-        error_exit "Blue-green deployment failed"
-    fi
-    
-    # Switch traffic
-    log "Switching traffic to ${NEW_COLOR}"
-    docker compose -f "${COMPOSE_FILE}" up -d nginx 2>&1 | tee -a "${DEPLOY_LOG}"
-    
-    # Stop old stack
-    log "Stopping old stack (${COLOR})"
-    docker compose -f "${COMPOSE_FILE}" stop api-${COLOR} worker-${COLOR}
-    
-    log "Blue-green deployment completed"
-}
-
-# Health check
-health_check() {
-    log "Running health checks..."
-    
-    local endpoints=(
-        "http://localhost:8000/api/v1/health"
-    )
-    
-    for endpoint in "${endpoints[@]}"; do
-        for i in {1..10}; do
-            if curl -sf "${endpoint}" > /dev/null 2>&1; then
-                log "✓ ${endpoint}"
-                break
-            fi
-            if [ "${i}" -eq 10 ]; then
-                log "✗ ${endpoint} failed after 10 attempts"
-                return 1
-            fi
+wait_healthy() {
+    local cid status waited=0
+    cid="$(docker compose ps -q app)"
+    [ -n "$cid" ] || return 1
+    while [ "$waited" -lt "$HEALTH_TIMEOUT" ]; do
+        status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$cid" 2>/dev/null || echo missing)"
+        case "$status" in
+            healthy) break ;;
+            unhealthy|missing) return 1 ;;
+        esac
+        sleep 3
+        waited=$((waited + 3))
+    done
+    [ "$status" = "healthy" ] || return 1
+    # End to end through nginx/TLS (-k: also valid for the bootstrap self-signed cert).
+    if command -v curl >/dev/null; then
+        local attempt
+        for attempt in 1 2 3 4 5; do
+            curl -fsSk --max-time 10 https://127.0.0.1/api/health >/dev/null && return 0
             sleep 3
         done
-    done
-    
+        log "app is healthy but https://127.0.0.1/api/health through nginx failed (attempt $attempt)"
+        return 1
+    fi
+    log "WARNING: curl not installed; skipped the end-to-end check through nginx"
     return 0
 }
 
-# Post-deployment
-post_deploy() {
-    log "Running post-deployment tasks..."
-    
-    # Run database migrations
-    log "Running database migrations..."
-    docker compose -f "${COMPOSE_FILE}" exec -T api alembic upgrade head || \
-        log "WARNING: Migration may have failed"
-    
-    # Clean up old images
-    docker image prune -f --filter "until=24h" || true
-    
-    # Record deployment
-    echo "${VERSION}:${TIMESTAMP}" > "${PROJECT_DIR}/.deployed"
-    
-    log "Post-deployment tasks completed"
-}
-
-# Rollback
-rollback() {
-    log "Initiating rollback..."
-    
-    local PREV_VERSION=""
-    if [ -f "${PROJECT_DIR}/.deployed" ]; then
-        PREV_VERSION=$(cat "${PROJECT_DIR}/.deployed" | cut -d: -f1)
-    fi
-    
-    if [ -n "${PREV_VERSION}" ]; then
-        export IMAGE_TAG="${PREV_VERSION}"
-        docker compose -f "${COMPOSE_FILE}" up -d --force-recreate
-        log "Rolled back to version: ${PREV_VERSION}"
-    else
-        log "No previous version found for rollback"
-        return 1
-    fi
-}
-
-# Main
 main() {
-    log "=== Deployment started: ${ENVIRONMENT} / ${VERSION} ==="
-    
-    pre_checks
-    backup_current
-    deploy_version
-    
-    if health_check; then
-        post_deploy
-        log "✓ Deployment successful"
-    else
-        log "✗ Health check failed after deployment"
-        rollback
-        exit 1
+    preflight
+    mkdir -p "$STATE_DIR"
+    local tag previous
+    tag="$(image_tag)"
+    previous="$(cat "$STATE_DIR/current" 2>/dev/null || true)"
+
+    log "Building transcript-app:${tag}"
+    IMAGE_TAG="$tag" docker compose build app
+
+    if [ -z "${SKIP_BACKUP:-}" ] && [ -n "$(docker compose ps -q app 2>/dev/null)" ]; then
+        log "Backing up data before deploying"
+        scripts/backup.sh || die "pre-deploy backup failed (set SKIP_BACKUP=1 to deploy anyway)"
     fi
+
+    log "Starting transcript-app:${tag}"
+    IMAGE_TAG="$tag" docker compose up -d --remove-orphans
+
+    if wait_healthy; then
+        [ -n "$previous" ] && [ "$previous" != "$tag" ] && printf '%s\n' "$previous" > "$STATE_DIR/previous"
+        printf '%s\n' "$tag" > "$STATE_DIR/current"
+        log "Deployed transcript-app:${tag}"
+        docker compose ps
+        return 0
+    fi
+
+    log "Deployment of ${tag} failed health checks; recent app logs:"
+    docker compose logs --tail 60 app || true
+    if [ -n "$previous" ] && docker image inspect "transcript-app:${previous}" >/dev/null 2>&1; then
+        log "Rolling back to transcript-app:${previous}"
+        IMAGE_TAG="$previous" docker compose up -d --remove-orphans
+        if wait_healthy; then
+            log "Rollback to ${previous} is healthy"
+        else
+            log "Rollback to ${previous} is NOT healthy"
+        fi
+    else
+        log "No previous image to roll back to"
+    fi
+    die "deployment failed"
 }
 
-main
+main "$@"

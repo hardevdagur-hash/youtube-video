@@ -1,116 +1,62 @@
-#!/bin/bash
-set -euo pipefail
+#!/usr/bin/env bash
+# Back up the persistent transcript data (job checkpoints + transcript cache).
+#
+#   scripts/backup.sh                     -> ./backups/transcript-data-<UTC>.tar.gz (+ .sha256)
+#   BACKUP_DIR=/srv/backups BACKUP_KEEP=30 scripts/backup.sh
+#
+# Not included on purpose: .env (secrets: back them up in your secret store),
+# logs, and DATA_DIR/tmp (short-lived audio). Checkpoints are written atomically
+# (write + rename), so an online backup captures complete files.
+set -Eeuo pipefail
 
-BACKUP_DIR="/opt/youtube-export-platform/backups"
-RETENTION_DAYS=30
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-LOG_FILE="/opt/youtube-export-platform/logs/backup-${TIMESTAMP}.log"
-COMPOSE_FILE="/opt/youtube-export-platform/docker/docker-compose.yml"
+cd "$(dirname "$0")/.."
+BACKUP_DIR="${BACKUP_DIR:-./backups}"
+BACKUP_KEEP="${BACKUP_KEEP:-14}"
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "${LOG_FILE}"; }
+log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+die() { log "ERROR: $*" >&2; exit 1; }
 
-backup_database() {
-    log "Backing up PostgreSQL database..."
-    mkdir -p "${BACKUP_DIR}/database"
-    
-    docker compose -f "${COMPOSE_FILE}" exec -T postgres \
-        pg_dump -U "${DB_USER:-ytplatform}" "${DB_NAME:-yt_platform}" \
-        --clean --if-exists --no-owner --no-privileges \
-        | gzip > "${BACKUP_DIR}/database/db-${TIMESTAMP}.sql.gz"
-    
-    log "Database backup: ${BACKUP_DIR}/database/db-${TIMESTAMP}.sql.gz ($(du -h "${BACKUP_DIR}/database/db-${TIMESTAMP}.sql.gz" | cut -f1))"
-}
+command -v docker >/dev/null || die "docker is not installed"
+[[ "$BACKUP_KEEP" =~ ^[0-9]+$ ]] && [ "$BACKUP_KEEP" -ge 1 ] || die "BACKUP_KEEP must be a positive integer"
 
-backup_redis() {
-    log "Backing up Redis data..."
-    mkdir -p "${BACKUP_DIR}/redis"
-    
-    docker compose -f "${COMPOSE_FILE}" exec -T redis \
-        redis-cli SAVE > /dev/null 2>&1
-    
-    docker compose -f "${COMPOSE_FILE}" cp \
-        redis:/data/dump.rdb "${BACKUP_DIR}/redis/redis-${TIMESTAMP}.rdb"
-    
-    log "Redis backup: ${BACKUP_DIR}/redis/redis-${TIMESTAMP}.rdb"
-}
+umask 077
+mkdir -p "$BACKUP_DIR"
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+archive="$BACKUP_DIR/transcript-data-${stamp}.tar.gz"
+partial="${archive}.partial"
+trap 'rm -f "$partial"' EXIT
 
-backup_config() {
-    log "Backing up configuration..."
-    mkdir -p "${BACKUP_DIR}/config"
-    
-    cp /opt/youtube-export-platform/.env "${BACKUP_DIR}/config/env-${TIMESTAMP}.backup"
-    cp "${COMPOSE_FILE}" "${BACKUP_DIR}/config/docker-compose-${TIMESTAMP}.backup"
-    
-    log "Configuration backup completed"
-}
+tar_args=(tar -C /app/data --exclude=./tmp -czf - .)
+set +e
+if [ -n "$(docker compose ps -q app 2>/dev/null)" ]; then
+    docker compose exec -T app "${tar_args[@]}" > "$partial"
+else
+    # App stopped: read the volume with a throwaway, network-less container of the same image.
+    cid="$(docker compose ps -aq app 2>/dev/null)"
+    [ -n "$cid" ] || die "no app container found; nothing has been deployed yet"
+    image="$(docker inspect -f '{{.Config.Image}}' "$cid")"
+    volume="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Name}}{{end}}{{end}}' "$cid")"
+    docker run --rm -i --network none -v "${volume}:/app/data:ro" --entrypoint tar "$image" "${tar_args[@]:1}" > "$partial"
+fi
+rc=$?
+set -e
+# GNU tar exits 1 when a file changed while being read (a job checkpoint was
+# replaced mid-backup); the archived copy is still a complete earlier version.
+[ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || die "tar failed with exit code $rc"
+[ "$rc" -eq 0 ] || log "WARNING: some files changed during the backup; archived versions are complete"
 
-backup_projects() {
-    log "Backing up project exports..."
-    mkdir -p "${BACKUP_DIR}/projects"
-    
-    if [ -d "/opt/youtube-export-platform/exports" ]; then
-        tar czf "${BACKUP_DIR}/projects/exports-${TIMESTAMP}.tar.gz" \
-            -C /opt/youtube-export-platform exports/ 2>/dev/null || true
-    fi
-    
-    if [ -d "/opt/youtube-export-platform/output" ]; then
-        tar czf "${BACKUP_DIR}/projects/output-${TIMESTAMP}.tar.gz" \
-            -C /opt/youtube-export-platform output/ 2>/dev/null || true
-    fi
-    
-    log "Projects backup completed"
-}
+tar -tzf "$partial" > /dev/null || die "archive verification failed"
+mv "$partial" "$archive"
+trap - EXIT
+( cd "$BACKUP_DIR" && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256" )
 
-cleanup_old_backups() {
-    log "Cleaning up backups older than ${RETENTION_DAYS} days..."
-    
-    find "${BACKUP_DIR}/database" -name "*.sql.gz" -type f -mtime +${RETENTION_DAYS} -delete
-    find "${BACKUP_DIR}/redis" -name "*.rdb" -type f -mtime +${RETENTION_DAYS} -delete
-    find "${BACKUP_DIR}/config" -name "*.backup" -type f -mtime +${RETENTION_DAYS} -delete
-    find "${BACKUP_DIR}/projects" -name "*.tar.gz" -type f -mtime +${RETENTION_DAYS} -delete
-    
-    log "Old backups cleaned"
-}
+jobs="$(tar -tzf "$archive" | grep -c '^\./transcript_jobs/[0-9a-f]\{12\}\.json$' || true)"
+log "Backup written: $archive ($(du -h "$archive" | cut -f1), ${jobs} job checkpoint(s))"
 
-verify_backups() {
-    log "Verifying backup integrity..."
-    
-    # Check database backup
-    if [ -f "${BACKUP_DIR}/database/db-${TIMESTAMP}.sql.gz" ]; then
-        gunzip -t "${BACKUP_DIR}/database/db-${TIMESTAMP}.sql.gz" && \
-            log "✓ Database backup verified" || \
-            log "✗ Database backup corrupted"
-    fi
-    
-    # Check Redis backup
-    if [ -f "${BACKUP_DIR}/redis/redis-${TIMESTAMP}.rdb" ]; then
-        file "${BACKUP_DIR}/redis/redis-${TIMESTAMP}.rdb" | grep -q "Redis" && \
-            log "✓ Redis backup verified" || \
-            log "✗ Redis backup may be invalid"
-    fi
-}
-
-report_status() {
-    log "=== Backup Summary ==="
-    log "Date: ${TIMESTAMP}"
-    log "Database: $(ls -lh "${BACKUP_DIR}/database/db-${TIMESTAMP}.sql.gz" 2>/dev/null | awk '{print $5}')"
-    log "Redis: $(ls -lh "${BACKUP_DIR}/redis/redis-${TIMESTAMP}.rdb" 2>/dev/null | awk '{print $5}')"
-    log "Total backups: $(find "${BACKUP_DIR}" -type f | wc -l)"
-    log "Backup size: $(du -sh "${BACKUP_DIR}" | cut -f1)"
-}
-
-main() {
-    log "=== Backup started ==="
-    
-    backup_database
-    backup_redis
-    backup_config
-    backup_projects
-    cleanup_old_backups
-    verify_backups
-    report_status
-    
-    log "=== Backup completed successfully ==="
-}
-
-main
+# Keep the newest BACKUP_KEEP archives (UTC timestamps in the names sort chronologically).
+mapfile -t old < <(find "$BACKUP_DIR" -maxdepth 1 -name 'transcript-data-*.tar.gz' -printf '%f\n' \
+    | sort -r | tail -n +"$((BACKUP_KEEP + 1))")
+for name in "${old[@]}"; do
+    rm -f -- "$BACKUP_DIR/$name" "$BACKUP_DIR/$name.sha256"
+    log "Pruned old backup $name"
+done

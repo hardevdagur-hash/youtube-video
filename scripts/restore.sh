@@ -1,120 +1,78 @@
-#!/bin/bash
-set -euo pipefail
+#!/usr/bin/env bash
+# Restore transcript data from a backup archive created by scripts/backup.sh.
+#
+#   scripts/restore.sh backups/transcript-data-20261007T120000Z.tar.gz [--yes]
+#
+# Steps: verify checksum and archive contents -> safety backup of the current data
+# -> stop the app -> replace the volume contents -> start the app -> verify.
+# Restoring replaces ALL current jobs and cached transcripts.
+set -Eeuo pipefail
 
-BACKUP_FILE="${1:-}"
-BACKUP_DIR="/opt/youtube-export-platform/backups"
-COMPOSE_FILE="/opt/youtube-export-platform/docker/docker-compose.yml"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-LOG_FILE="/opt/youtube-export-platform/logs/restore-${TIMESTAMP}.log"
+cd "$(dirname "$0")/.."
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "${LOG_FILE}"; }
+log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+die() { log "ERROR: $*" >&2; exit 1; }
 
-list_backups() {
-    log "Available database backups:"
-    ls -lh "${BACKUP_DIR}/database/" 2>/dev/null | grep ".sql.gz" || log "No backups found"
-    log ""
-    log "Available Redis backups:"
-    ls -lh "${BACKUP_DIR}/redis/" 2>/dev/null | grep ".rdb" || log "No Redis backups found"
-}
+archive="${1:-}"
+assume_yes="${2:-}"
+[ -n "$archive" ] || die "usage: $0 <backup.tar.gz> [--yes]"
+[ -f "$archive" ] || die "archive not found: $archive"
+command -v docker >/dev/null || die "docker is not installed"
 
-restore_database() {
-    local DB_BACKUP="$1"
-    if [ ! -f "${DB_BACKUP}" ]; then
-        log "ERROR: Backup file not found: ${DB_BACKUP}"
-        exit 1
-    fi
-    
-    log "Restoring database from: ${DB_BACKUP}"
-    
-    # Stop API and workers
-    docker compose -f "${COMPOSE_FILE}" stop api worker beat
-    
-    # Drop and recreate database
-    docker compose -f "${COMPOSE_FILE}" exec -T postgres \
-        psql -U "${DB_USER:-ytplatform}" -d postgres -c \
-        "DROP DATABASE IF EXISTS ${DB_NAME:-yt_platform};" 2>/dev/null || true
-    
-    docker compose -f "${COMPOSE_FILE}" exec -T postgres \
-        psql -U "${DB_USER:-ytplatform}" -d postgres -c \
-        "CREATE DATABASE ${DB_NAME:-yt_platform};"
-    
-    # Restore from backup
-    gunzip -c "${DB_BACKUP}" | \
-        docker compose -f "${COMPOSE_FILE}" exec -T postgres \
-        psql -U "${DB_USER:-ytplatform}" "${DB_NAME:-yt_platform}"
-    
-    log "Database restored"
-    
-    # Start services
-    docker compose -f "${COMPOSE_FILE}" start api worker beat
-    
-    log "Services restarted"
-}
+if [ -f "${archive}.sha256" ]; then
+    ( cd "$(dirname "$archive")" && sha256sum -c "$(basename "$archive").sha256" ) >/dev/null \
+        || die "checksum mismatch for $archive"
+    log "Checksum verified"
+else
+    log "WARNING: no ${archive}.sha256 next to the archive; skipping checksum verification"
+fi
 
-restore_redis() {
-    local REDIS_BACKUP="$1"
-    if [ ! -f "${REDIS_BACKUP}" ]; then
-        log "ERROR: Redis backup not found: ${REDIS_BACKUP}"
-        exit 1
-    fi
-    
-    log "Restoring Redis from: ${REDIS_BACKUP}"
-    
-    docker compose -f "${COMPOSE_FILE}" stop redis
-    docker compose -f "${COMPOSE_FILE}" cp "${REDIS_BACKUP}" redis:/data/dump.rdb
-    docker compose -f "${COMPOSE_FILE}" start redis
-    
-    log "Redis restored"
-}
+listing="$(tar -tzf "$archive")" || die "archive is corrupt or not a gzip tarball"
+if grep -Eq '(^/|(^|/)\.\.(/|$))' <<< "$listing"; then
+    die "archive contains absolute or parent-directory paths; refusing to restore"
+fi
+expected_jobs="$(grep -c '^\./transcript_jobs/[0-9a-f]\{12\}\.json$' <<< "$listing" || true)"
+log "Archive contains ${expected_jobs} job checkpoint(s)"
 
-main() {
-    log "=== Restore started ==="
-    
-    if [ -z "${BACKUP_FILE}" ]; then
-        list_backups
-        log "Usage: $0 <backup-file>"
-        log "       $0 database    (restore latest database backup)"
-        log "       $0 redis       (restore latest redis backup)"
-        exit 0
-    fi
-    
-    case "${BACKUP_FILE}" in
-        database)
-            LATEST=$(ls -t "${BACKUP_DIR}/database"/db-*.sql.gz 2>/dev/null | head -1)
-            if [ -n "${LATEST}" ]; then
-                restore_database "${LATEST}"
-            else
-                log "No database backups found"
-                exit 1
-            fi
-            ;;
-        redis)
-            LATEST=$(ls -t "${BACKUP_DIR}/redis"/redis-*.rdb 2>/dev/null | head -1)
-            if [ -n "${LATEST}" ]; then
-                restore_redis "${LATEST}"
-            else
-                log "No Redis backups found"
-                exit 1
-            fi
-            ;;
-        *)
-            if [ -f "${BACKUP_FILE}" ]; then
-                if [[ "${BACKUP_FILE}" == *.sql.gz ]]; then
-                    restore_database "${BACKUP_FILE}"
-                elif [[ "${BACKUP_FILE}" == *.rdb ]]; then
-                    restore_redis "${BACKUP_FILE}"
-                else
-                    log "Unknown backup format: ${BACKUP_FILE}"
-                    exit 1
-                fi
-            else
-                log "Backup file not found: ${BACKUP_FILE}"
-                exit 1
-            fi
-            ;;
-    esac
-    
-    log "=== Restore completed ==="
-}
+if [ "$assume_yes" != "--yes" ]; then
+    read -r -p "This replaces all current transcript data. Type RESTORE to continue: " answer
+    [ "$answer" = "RESTORE" ] || die "aborted"
+fi
 
-main
+log "Taking a safety backup of the current data"
+scripts/backup.sh || die "safety backup failed; nothing was changed"
+
+cid="$(docker compose ps -aq app)"
+[ -n "$cid" ] || die "no app container found; deploy once (scripts/deploy.sh) before restoring"
+image="$(docker inspect -f '{{.Config.Image}}' "$cid")"
+volume="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Name}}{{end}}{{end}}' "$cid")"
+[ -n "$volume" ] || die "could not determine the data volume of the app container"
+
+log "Stopping the app"
+docker compose stop app
+
+log "Restoring $archive into volume $volume"
+docker run --rm -i --network none -v "${volume}:/app/data" --entrypoint sh "$image" -c \
+    'find /app/data -mindepth 1 -delete && tar -xzf - -C /app/data' < "$archive" \
+    || die "restore failed; the safety backup can be restored the same way"
+
+log "Starting the app"
+docker compose up -d app
+
+cid="$(docker compose ps -q app)"
+waited=0
+status=""
+while [ "$waited" -lt "$HEALTH_TIMEOUT" ]; do
+    status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$cid" 2>/dev/null || true)"
+    [ "$status" = "healthy" ] && break
+    [ "$status" = "unhealthy" ] && break
+    sleep 3
+    waited=$((waited + 3))
+done
+[ "$status" = "healthy" ] || die "app is not healthy after restore (status: ${status:-unknown}); check 'docker compose logs app'"
+
+restored_jobs="$(docker compose exec -T app sh -c 'ls /app/data/transcript_jobs 2>/dev/null | grep -c "^[0-9a-f]\{12\}\.json$" || true')"
+[ "$restored_jobs" = "$expected_jobs" ] \
+    || die "restored ${restored_jobs} job checkpoint(s), expected ${expected_jobs}"
+log "Restore complete: ${restored_jobs} job checkpoint(s), app healthy"

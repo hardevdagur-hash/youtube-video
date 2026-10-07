@@ -33,6 +33,11 @@ data/transcripts/
 data/transcript_jobs/
 *.db
 
+# Deployment state, backups and certificates (host-specific; may contain secrets)
+.deploy/
+backups/
+docker/letsencrypt/
+
 # IDE
 .vscode/
 .idea/

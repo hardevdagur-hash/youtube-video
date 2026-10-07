@@ -1,74 +1,40 @@
-#!/bin/bash
-set -euo pipefail
+#!/usr/bin/env bash
+# Start a previously deployed image again (code rollback; data is not touched).
+#
+#   scripts/rollback.sh            -> the image deployed before the current one
+#   scripts/rollback.sh <tag>      -> a specific transcript-app:<tag>
+#
+# To also roll back data, restore a backup with scripts/restore.sh.
+set -Eeuo pipefail
 
-ENVIRONMENT="${1:-production}"
-VERSION="${2:-}"
-COMPOSE_FILE="docker/docker-compose.yml"
-PROJECT_DIR="/opt/youtube-export-platform"
-BACKUP_DIR="${PROJECT_DIR}/backups"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-LOG_FILE="${PROJECT_DIR}/logs/rollback-${TIMESTAMP}.log"
+cd "$(dirname "$0")/.."
+STATE_DIR=".deploy"
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "${LOG_FILE}"; }
+log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+die() { log "ERROR: $*" >&2; exit 1; }
 
-rollback_to_version() {
-    local TARGET_VERSION="$1"
-    log "Rolling back to version: ${TARGET_VERSION}"
-    
-    export IMAGE_TAG="${TARGET_VERSION}"
-    
-    # Pull the target version
-    docker compose -f "${COMPOSE_FILE}" pull 2>&1 | tee -a "${LOG_FILE}" || true
-    
-    # Restart with target version
-    docker compose -f "${COMPOSE_FILE}" up -d --force-recreate 2>&1 | tee -a "${LOG_FILE}"
-    
-    log "Rollback to ${TARGET_VERSION} completed"
-}
+target="${1:-$(cat "$STATE_DIR/previous" 2>/dev/null || true)}"
+current="$(cat "$STATE_DIR/current" 2>/dev/null || true)"
+[ -n "$target" ] || die "no previous deployment recorded; pass an image tag (docker images transcript-app)"
+docker image inspect "transcript-app:${target}" >/dev/null 2>&1 || die "image transcript-app:${target} not found"
 
-rollback_to_backup() {
-    log "Rolling back to database backup..."
-    
-    local LATEST_BACKUP=$(ls -t "${BACKUP_DIR}"/db-*.sql 2>/dev/null | head -1)
-    if [ -n "${LATEST_BACKUP}" ]; then
-        log "Restoring database from: ${LATEST_BACKUP}"
-        docker compose -f "${COMPOSE_FILE}" exec -T postgres \
-            psql -U "${DB_USER:-ytplatform}" "${DB_NAME:-yt_platform}" < "${LATEST_BACKUP}"
-        log "Database restored"
-    else
-        log "No backup found for database restore"
-    fi
-    
-    # Restore environment
-    local LATEST_ENV=$(ls -t "${BACKUP_DIR}"/env-*.backup 2>/dev/null | head -1)
-    if [ -n "${LATEST_ENV}" ]; then
-        cp "${LATEST_ENV}" "${PROJECT_DIR}/.env"
-        log "Environment restored from backup"
-    fi
-}
+log "Rolling back from ${current:-unknown} to ${target}"
+IMAGE_TAG="$target" docker compose up -d --remove-orphans
 
-main() {
-    log "=== Rollback initiated: ${ENVIRONMENT} ==="
-    
-    if [ -n "${VERSION}" ]; then
-        rollback_to_version "${VERSION}"
-    else
-        # Rollback to previous version
-        if [ -f "${PROJECT_DIR}/.deployed" ]; then
-            local PREV_VERSION=$(cat "${PROJECT_DIR}/.deployed" | cut -d: -f1)
-            rollback_to_version "${PREV_VERSION}"
-        fi
-        rollback_to_backup
-    fi
-    
-    # Health check
-    sleep 15
-    if curl -sf http://localhost:8000/api/v1/health > /dev/null 2>&1; then
-        log "✓ Rollback successful - service healthy"
-    else
-        log "✗ Rollback health check failed - manual intervention required"
-        exit 1
-    fi
-}
+cid="$(docker compose ps -q app)"
+waited=0
+status=""
+while [ "$waited" -lt "$HEALTH_TIMEOUT" ]; do
+    status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$cid" 2>/dev/null || true)"
+    [ "$status" = "healthy" ] && break
+    [ "$status" = "unhealthy" ] && break
+    sleep 3
+    waited=$((waited + 3))
+done
+[ "$status" = "healthy" ] || die "transcript-app:${target} is not healthy (status: ${status:-unknown})"
 
-main
+mkdir -p "$STATE_DIR"
+[ -n "$current" ] && printf '%s\n' "$current" > "$STATE_DIR/previous"
+printf '%s\n' "$target" > "$STATE_DIR/current"
+log "Rolled back to transcript-app:${target}"

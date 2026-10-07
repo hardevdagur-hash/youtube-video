@@ -1,0 +1,86 @@
+# Production stack: nginx (TLS, the only public entry point) -> app (1 instance, 1 worker).
+#
+#   scripts/deploy.sh        build, start, health-check, auto-rollback
+#   scripts/backup.sh        archive the transcript_data volume
+#   scripts/restore.sh       restore an archive into the volume
+#   scripts/rollback.sh      start the previously deployed image
+#
+# Secrets and settings come from ./.env (see .env.example); the values under
+# `environment:` are fixed by this topology and override .env.
+name: transcripts
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: transcript-app:${IMAGE_TAG:-latest}
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      DATA_DIR: /app/data
+      LOG_TO_FILE: "false"
+      # nginx's fixed address on the internal network; only it may set X-Forwarded-For.
+      TRUSTED_PROXIES: 172.28.0.10
+    volumes:
+      - transcript_data:/app/data
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    expose:
+      - "8000"
+    networks:
+      internal:
+        ipv4_address: 172.28.0.20
+    restart: unless-stopped
+    # Long enough for the app to checkpoint running jobs as "paused" on shutdown.
+    stop_grace_period: 45s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/certs:/etc/nginx/certs:ro
+      - ./docker/nginx/acme:/var/www/acme:ro
+    depends_on:
+      app:
+        condition: service_healthy
+    networks:
+      internal:
+        ipv4_address: 172.28.0.10
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/nginx-health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *logging
+
+networks:
+  internal:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+volumes:
+  transcript_data:

@@ -1,0 +1,3 @@
+# TLS keys and certificates are host-specific secrets: never commit them.
+*
+!.gitignore

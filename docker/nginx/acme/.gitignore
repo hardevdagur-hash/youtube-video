@@ -1,0 +1,3 @@
+# Let's Encrypt HTTP-01 challenge files (written by certbot at runtime).
+*
+!.gitignore
