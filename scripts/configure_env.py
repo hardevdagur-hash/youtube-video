@@ -121,8 +121,12 @@ def normalize_origin(origin: str, *, production: bool) -> str:
             f"Invalid origin {value[:100]!r}: expected scheme://host[:port] with no path"
         )
     scheme, host = match.group(1), match.group(2).lower()
-    if production and scheme != "https" and host not in _LOCAL_HOSTS:
+    if production and scheme != "https":
         raise ConfigureError(f"Production origin {value[:100]!r} must use https")
+    if not production and scheme != "https" and host not in _LOCAL_HOSTS:
+        raise ConfigureError(
+            f"Development origin {value[:100]!r} must be https or a localhost/127.0.0.1 address"
+        )
     if match.group(3) and not 1 <= int(match.group(3)[1:]) <= 65535:
         raise ConfigureError(f"Invalid port in origin {value[:100]!r}")
     return f"{scheme}://{host}{match.group(3) or ''}"

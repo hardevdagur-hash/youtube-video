@@ -413,12 +413,32 @@ def _boot(overrides: dict[str, str | None]) -> dict:
     ({"API_KEYS": None}, "no credentials"),
     ({"CORS_ORIGINS": "*"}, "CORS_ORIGINS"),
     ({"CORS_ORIGINS": "https://app.example.com,*"}, "CORS_ORIGINS"),
+    ({"CORS_ORIGINS": "http://app.example.com"}, "https://"),
+    ({"CORS_ORIGINS": "http://localhost:5173"}, "https://"),
+    ({"CORS_ORIGINS": "https://app.example.com,http://other.example.com"}, "https://"),
+    ({"CORS_ORIGINS": "https://app.example.com/path"}, "https://"),
+    ({"APP_ENV": "prod"}, "APP_ENV"),
+    ({"APP_ENV": "staging"}, "APP_ENV"),
 ])
 def test_production_refuses_to_start(overrides, expected):
     result = _boot(overrides)
     assert result["started"] is False
     assert result["error"] == "AuthConfigError"
     assert expected in result["message"]
+
+
+@pytest.mark.parametrize("origins", [
+    "https://REAL-DOMAIN.example",
+    "https://real-domain.example,https://www.real-domain.example:8443",
+])
+def test_production_accepts_explicit_https_origins(origins):
+    assert _boot({"CORS_ORIGINS": origins})["started"] is True
+
+
+def test_development_accepts_local_vite_origin():
+    result = _boot({"APP_ENV": "development", "CORS_ORIGINS": "http://localhost:5173",
+                    "JWT_SECRET_KEY": None})
+    assert result["started"] is True
 
 
 def test_production_starts_with_safe_config_and_hides_api_docs():

@@ -53,6 +53,9 @@ API_KEY_HEADER = "x-api-key"
 
 _INSECURE_JWT_DEFAULTS = frozenset({"", "change-me-in-production-32-chars!"})
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
+VALID_APP_ENVS = frozenset({"development", "production"})
+# Production browser origins: https, host (or bracketed IPv6) and optional port; no path.
+_HTTPS_ORIGIN_RE = re.compile(r"^https://([A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\])(:\d{1,5})?$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 # scrypt parameters for newly generated password hashes (~16 MB, ~50 ms).
@@ -187,6 +190,11 @@ class AuthSettings:
     def from_env(cls, env: dict[str, str] | None = None) -> AuthSettings:
         env = dict(os.environ) if env is None else env
         app_env = env.get("APP_ENV", "development").strip().lower() or "development"
+        if app_env not in VALID_APP_ENVS:
+            # Fail closed: a typo such as "prod" must not silently get development rules.
+            raise AuthConfigError(
+                f"APP_ENV must be one of {sorted(VALID_APP_ENVS)}, got {app_env[:32]!r}"
+            )
 
         secret = env.get("JWT_SECRET_KEY", "").strip()
         ephemeral = False
@@ -217,6 +225,12 @@ class AuthSettings:
                 issues.append("JWT_SECRET_KEY must be set to a random value of at least 32 characters")
             if "*" in self.cors_origins:
                 issues.append("CORS_ORIGINS must list explicit origins, not '*'")
+            insecure = [o for o in self.cors_origins if o != "*" and not _valid_https_origin(o)]
+            if insecure:
+                shown = ", ".join(repr(o[:100]) for o in insecure[:5])
+                issues.append(
+                    f"CORS_ORIGINS must contain only https://host[:port] origins in production: {shown}"
+                )
         if not self.users and not self.api_keys:
             issues.append("no credentials configured: set AUTH_USERS and/or API_KEYS")
         return issues
@@ -232,6 +246,14 @@ class AuthSettings:
             logger.warning("JWT_SECRET_KEY not set; using an ephemeral development secret")
         if "*" in self.cors_origins:
             logger.warning("CORS_ORIGINS='*' is only tolerated in development")
+
+
+def _valid_https_origin(origin: str) -> bool:
+    match = _HTTPS_ORIGIN_RE.match(origin)
+    if not match:
+        return False
+    port = match.group(2)
+    return port is None or 1 <= int(port[1:]) <= 65535
 
 
 def _split(raw: str) -> list[str]:

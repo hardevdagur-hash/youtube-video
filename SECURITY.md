@@ -40,8 +40,24 @@ exceptions are `GET /api/health` (coarse status only) and `POST /api/auth/login|
   The `.env.backup-*` file it leaves contains the previous secrets; delete it once verified.
 - Removing a user from `AUTH_USERS` revokes their sessions on the next request.
   Rotating `JWT_SECRET_KEY` revokes all sessions.
+- `APP_ENV` must be exactly `development` (the default) or `production`; any other
+  value (e.g. `prod`, `staging`) stops startup instead of silently getting development rules.
 - With `APP_ENV=production` the app refuses to start when `JWT_SECRET_KEY` is
-  missing or weak, no credentials are configured, or `CORS_ORIGINS` contains `*`.
+  missing or weak, no credentials are configured, or `CORS_ORIGINS` contains `*` or
+  anything other than `https://host[:port]` origins (plain `http://`, including localhost,
+  is rejected).
+
+### Local development vs. production origins
+
+| | `APP_ENV` | `CORS_ORIGINS` |
+| --- | --- | --- |
+| Local (Vite dev server, `frontend/vite.config.ts`) | `development` | `http://localhost:5173` |
+| Production | `production` | your real `https://` origin(s), comma-separated |
+
+The Vite dev server proxies `/api` to `http://localhost:8000`, so local HTTP is confined to
+the loopback interface. When a real domain exists, re-run
+`python scripts/configure_env.py --origin https://<real-domain>` (production is the default
+mode); it replaces `CORS_ORIGINS` and refuses `*` or `http://` origins.
 - Rate limits are per principal (`API_RATE_LIMIT_PER_MINUTE`, `COSTLY_RATE_LIMIT_PER_MINUTE`)
   and per IP for login. Repeated failed logins lock that username for 15 minutes.
   The limits are held in process memory: with several workers or replicas, each one

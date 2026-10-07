@@ -133,14 +133,27 @@ class TestValidation:
         with pytest.raises(configure_env.ConfigureError):
             _build(origins=[origin])
 
-    def test_production_requires_https_except_localhost(self):
+    @pytest.mark.parametrize(
+        "origin", ["http://transcripts.example.com", "http://localhost:5173", "http://127.0.0.1:8000"]
+    )
+    def test_production_rejects_every_http_origin(self, origin):
         with pytest.raises(configure_env.ConfigureError, match="https"):
-            _build(origins=["http://transcripts.example.com"])
-        assert configure_env.verify(_build(origins=["http://localhost:8000"]).lines) == []
+            _build(origins=[origin])
 
-    def test_development_allows_http(self):
-        result = _build(origins=["http://dev.internal:5173"], app_env="development")
+    def test_production_accepts_real_https_origin(self):
+        result = _build(origins=["https://real-domain.example"])
+        assert configure_env.verify(result.lines) == []
+
+    @pytest.mark.parametrize("origin", ["http://localhost:5173", "http://127.0.0.1:5173"])
+    def test_development_allows_http_localhost(self, origin):
+        result = _build(origins=[origin], app_env="development")
         assert configure_env.get_value(result.lines, "APP_ENV") == "development"
+        assert configure_env.get_value(result.lines, "CORS_ORIGINS") == origin
+        assert configure_env.verify(result.lines) == []
+
+    def test_development_rejects_http_non_local_host(self):
+        with pytest.raises(configure_env.ConfigureError, match="localhost"):
+            _build(origins=["http://dev.internal:5173"], app_env="development")
 
     def test_production_requires_an_origin(self):
         with pytest.raises(configure_env.ConfigureError, match="origin"):
