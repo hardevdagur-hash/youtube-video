@@ -28,7 +28,7 @@ jobs:
       - name: Black check
         run: black --check --line-length=100 .
       - name: Ruff check
-        run: ruff check --line-length=100 .
+        run: ruff check --no-fix --line-length=100 .
       - name: MyPy check
         run: mypy --ignore-missing-imports .
       - name: Bandit check

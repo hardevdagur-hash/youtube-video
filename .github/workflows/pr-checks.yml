@@ -23,7 +23,7 @@ jobs:
           CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep '\.py$' || true)
           if [ -n "$CHANGED" ]; then
             black --check --line-length=100 $CHANGED
-            ruff check --line-length=100 $CHANGED
+            ruff check --no-fix --line-length=100 $CHANGED
           fi
       - name: Run smoke tests
         run: pytest -m "smoke" -v --timeout=60

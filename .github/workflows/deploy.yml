@@ -72,7 +72,7 @@ jobs:
       - name: Lint
         run: |
           black --check --line-length=100 .
-          ruff check --line-length=100 .
+          ruff check --no-fix --line-length=100 .
       - name: Type check
         run: mypy --ignore-missing-imports .
       - name: Unit tests

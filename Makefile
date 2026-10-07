@@ -28,7 +28,7 @@ install:
 
 lint:
 	black --check --line-length=100 .
-	ruff check --line-length=100 .
+	ruff check --no-fix --line-length=100 .
 	isort --check-only --profile=black --line-length=100 .
 
 typecheck:
