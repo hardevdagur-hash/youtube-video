@@ -61,9 +61,7 @@ def estimate_unicode_width(text: str) -> int:
     width = 0
     for c in text:
         cp = ord(c)
-        if 0x1100 <= cp <= 0x11FF or 0x2E80 <= cp <= 0x9FFF or 0xA000 <= cp <= 0xA4CF:
-            width += 2
-        elif 0xAC00 <= cp <= 0xD7AF:
+        if 0x1100 <= cp <= 0x11FF or 0x2E80 <= cp <= 0x9FFF or 0xA000 <= cp <= 0xA4CF or 0xAC00 <= cp <= 0xD7AF:
             width += 2
         elif 0xFE00 <= cp <= 0xFE0F:
             width += 0

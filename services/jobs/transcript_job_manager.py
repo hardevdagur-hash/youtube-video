@@ -74,8 +74,8 @@ def parse_date_boundary(date_str: str | None, is_end_of_day: bool = False) -> da
             if is_end_of_day:
                 dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
             return dt.replace(tzinfo=UTC)
-        except Exception:
-            pass
+        except ValueError:
+            pass  # not a plain date: fall through to the ISO 8601 parser below
     try:
         clean_s = s.replace("Z", "+00:00")
         dt = datetime.fromisoformat(clean_s)
@@ -376,8 +376,6 @@ class TranscriptJobManager:
         min_duration: int = 180,
         max_duration: int = 1800,
         force_refresh: bool = False,
-        caption_concurrency: int | None = None,
-        whisper_concurrency: int = 1,
         published_after: str | None = None,
         published_before: str | None = None,
         output_language: str = "en",
@@ -387,8 +385,6 @@ class TranscriptJobManager:
         self._check_capacity(owner)
         clean_handle = channel_handle.strip().lstrip("@")
         job_id = uuid.uuid4().hex[:12]
-
-        eff_caption_conc = caption_concurrency or settings.transcript_max_concurrency
 
         progress = TranscriptJobProgress(
             job_id=job_id,
@@ -418,17 +414,15 @@ class TranscriptJobManager:
                 min_duration=min_duration,
                 max_duration=max_duration,
                 force_refresh=force_refresh,
-                caption_concurrency=eff_caption_conc,
-                whisper_concurrency=whisper_concurrency,
                 published_after=published_after,
                 published_before=published_before,
-                output_language=output_language or "en",
             ),
         )
 
         logger.info(
-            "Queued transcript job %s for channel '%s' (concurrency=%d, pacing=%.1fs, out_lang=%s, pub_after=%s, pub_before=%s)",
-            job_id, clean_handle, eff_caption_conc, settings.transcript_request_interval,
+            "Queued transcript job %s for channel '%s' (max_videos=%d, pacing=%.1fs, out_lang=%s, "
+            "pub_after=%s, pub_before=%s); videos are processed sequentially",
+            job_id, clean_handle, max_videos, settings.transcript_request_interval,
             output_language, published_after, published_before,
         )
         return progress
@@ -460,11 +454,8 @@ class TranscriptJobManager:
                     min_duration=180,
                     max_duration=1800,
                     force_refresh=False,
-                    caption_concurrency=settings.transcript_max_concurrency,
-                    whisper_concurrency=settings.whisper_max_concurrency,
                     published_after=job.published_after,
                     published_before=job.published_before,
-                    output_language=job.output_language,
                 ))
                 logger.info("Restarted discovery for transcript job %s", job_id)
                 return job
@@ -498,8 +489,6 @@ class TranscriptJobManager:
             self._launch(job, self._run_job(
                 job,
                 force_refresh=False,
-                caption_concurrency=settings.transcript_max_concurrency,
-                whisper_concurrency=settings.whisper_max_concurrency,
             ))
             logger.info("Resumed transcript job %s (%d items remaining)", job_id, len(pending_items))
             return job
@@ -512,12 +501,13 @@ class TranscriptJobManager:
         min_duration: int,
         max_duration: int,
         force_refresh: bool,
-        caption_concurrency: int,
-        whisper_concurrency: int,
         published_after: str | None = None,
         published_before: str | None = None,
-        output_language: str = "en",
     ) -> None:
+        """Discover eligible channel videos, then process them (sequentially, with global pacing).
+
+        The output mode is read from ``progress.output_language``.
+        """
         from api.channel_service import ChannelService
         from api.video_service import VideoService
 
@@ -656,8 +646,6 @@ class TranscriptJobManager:
             await self._run_job(
                 progress,
                 force_refresh=force_refresh,
-                caption_concurrency=caption_concurrency,
-                whisper_concurrency=whisper_concurrency,
             )
 
         except asyncio.CancelledError:
@@ -739,8 +727,6 @@ class TranscriptJobManager:
         self,
         job: TranscriptJobProgress,
         force_refresh: bool = False,
-        caption_concurrency: int = 1,
-        whisper_concurrency: int = 1,
     ) -> None:
         """Execute transcript retrieval with pacing, circuit breaker cooldown, and retry."""
         from services.transcript_service import TranscriptService

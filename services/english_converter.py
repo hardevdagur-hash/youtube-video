@@ -346,9 +346,8 @@ class EnglishConverter:
             result = self._resolve_title_entities(result, title)
 
         # 4. Channel-guided resolution
-        if channel:
-            if "physics galaxy" in channel.lower():
-                result = re.sub(r"\b(fuzzic|physics)\s+galax[iy]\b", "Physics Galaxy", result, flags=re.IGNORECASE)
+        if channel and "physics galaxy" in channel.lower():
+            result = re.sub(r"\b(fuzzic|physics)\s+galax[iy]\b", "Physics Galaxy", result, flags=re.IGNORECASE)
 
         # 5. Exact term casing preservation
         for lower_term, canonical in EXACT_TERMS.items():
@@ -503,7 +502,6 @@ class EnglishConverter:
         self,
         clean_text: str,
         raw_text: str,
-        title: str | None = None,
     ) -> dict[str, Any]:
         """Validate transcript quality according to production criteria.
 

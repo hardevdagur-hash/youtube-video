@@ -101,7 +101,7 @@ class ThreatType(Enum):
     CSRF = "csrf"
     PATH_TRAVERSAL = "path_traversal"
     RATE_LIMIT_EXCEEDED = "rate_limit_exceeded"
-    SUSPICIOUS_TOKEN = "suspicious_token"
+    SUSPICIOUS_TOKEN = "suspicious_token"  # noqa: S105 - threat category name, not a secret
     UNAUTHORIZED_ACCESS = "unauthorized_access"
     SENSITIVE_DATA_EXPOSURE = "sensitive_data_exposure"
 

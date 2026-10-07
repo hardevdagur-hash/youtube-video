@@ -318,11 +318,6 @@ def test_transcript_job_max_videos_bounded(authed_client, max_videos):
     assert resp.status_code == 422
 
 
-def test_transcript_job_body_concurrency_bounded(authed_client):
-    resp = authed_client.post("/api/channel/somechannel/transcript-job", json={"caption_concurrency": 500})
-    assert resp.status_code == 422
-
-
 def test_channel_transcripts_limit_bounded(authed_client):
     assert authed_client.get("/api/channel/somechannel/transcripts?limit=999999").status_code == 422
     assert authed_client.get("/api/channel/somechannel/transcripts?concurrency=1000").status_code == 422

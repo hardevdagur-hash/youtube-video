@@ -6,6 +6,7 @@ Uses googleapiclient with a patched httplib2 that:
   - Has proper timeouts and logging
 """
 
+import contextlib
 import logging
 import ssl
 import time
@@ -136,10 +137,8 @@ class YouTubeClient:
             ca_certs=get_ca_bundle_path(),
             disable_ssl_certificate_validation=False,
         )
-        try:
+        with contextlib.suppress(AttributeError):
             http.redirect_codes = http.redirect_codes - {308}
-        except AttributeError:
-            pass
         return http
 
     def get_service(self) -> Resource:
@@ -206,7 +205,7 @@ class YouTubeClient:
                 ) from e
 
         # All retries exhausted
-        if isinstance(last_error, (ssl.SSLError, ssl.SSLZeroReturnError, ssl.SSLEOFError)):
+        if isinstance(last_error, ssl.SSLError | ssl.SSLZeroReturnError | ssl.SSLEOFError):
             raise YouTubeAPISslError(
                 "Unable to connect securely to the YouTube API service. "
                 "Please try again in a few moments. Technical details have been logged."

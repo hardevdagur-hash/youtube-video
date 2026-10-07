@@ -35,8 +35,10 @@ RUN groupadd --gid 1000 app \
 
 WORKDIR /app
 
-COPY requirements.txt ./
-RUN pip install -r requirements.txt
+# requirements.lock pins the exact, tested versions (regenerate after editing requirements.txt:
+#   uv pip compile requirements.txt --universal --python-version 3.12 -o requirements.lock)
+COPY requirements.lock ./
+RUN pip install -r requirements.lock
 
 # Application code only (no tests, docs, .env or local data; see also .dockerignore).
 COPY --chown=app:app api/ api/

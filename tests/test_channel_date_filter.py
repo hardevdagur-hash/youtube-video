@@ -113,11 +113,8 @@ async def test_channel_discovery_with_date_filters(tmp_path):
             min_duration=180,
             max_duration=1800,
             force_refresh=False,
-            caption_concurrency=1,
-            whisper_concurrency=1,
             published_after="2024-05-01",
             published_before="2024-05-31",
-            output_language="en",
         )
 
         # Only vid_mid should be eligible

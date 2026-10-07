@@ -1,4 +1,7 @@
--r requirements.txt
+# Development and CI: the exact production versions plus test/lint tools.
+-r requirements.lock
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
+# Starlette's TestClient transport (plain httpx is deprecated for it)
+httpx2>=2.0.0
 ruff>=0.6.0

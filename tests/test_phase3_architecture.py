@@ -92,7 +92,9 @@ async def test_resume_reruns_interrupted_discovery(tmp_path, monkeypatch):
     job = await manager.resume_job("eeeeeeeeeeee")
     await asyncio.sleep(0)
     assert job.status == JobStatus.QUEUED  # not wrongly marked completed
-    assert calls and calls[0]["max_videos"] == 7 and calls[0]["output_language"] == "original"
+    assert calls
+    assert calls[0]["max_videos"] == 7
+    assert calls[0]["progress"].output_language == "original"
 
 
 # ---------------------------------------------------------------------------

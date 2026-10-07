@@ -49,10 +49,7 @@ def is_youtube_domain(domain: str) -> bool:
 def is_supported_path(path: str) -> bool:
     """Check if the URL path is not an unsupported YouTube resource."""
     lower_path = path.lower()
-    for unsupported in UNSUPPORTED_PATHS:
-        if lower_path.startswith(unsupported):
-            return False
-    return True
+    return all(not lower_path.startswith(unsupported) for unsupported in UNSUPPORTED_PATHS)
 
 
 def extract_video_id_from_query(query: str) -> str | None:

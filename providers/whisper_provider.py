@@ -88,7 +88,7 @@ class WhisperProvider(TranscriptProvider):
         language: str | None = None,
         title: str | None = None,
         channel_title: str | None = None,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ARG002 - TranscriptProvider interface
     ) -> TranscriptResult:
         """Download audio and transcribe with Whisper.
 
@@ -117,13 +117,13 @@ class WhisperProvider(TranscriptProvider):
                 import json
                 import urllib.request
                 oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
-                req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=3) as resp:
+                req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})  # noqa: S310 (fixed https URL)
+                with urllib.request.urlopen(req, timeout=3) as resp:  # noqa: S310 (fixed https URL)
                     oembed_data = json.loads(resp.read().decode("utf-8"))
                     title = oembed_data.get("title", "")
                     channel_title = channel_title or oembed_data.get("author_name", "")
-            except Exception:
-                pass
+            except Exception as exc:  # the title only biases transcription; continue without it
+                logger.debug("oEmbed title lookup failed for %s: %s", video_id, exc)
 
         audio_path = None
         download_start = time.time()

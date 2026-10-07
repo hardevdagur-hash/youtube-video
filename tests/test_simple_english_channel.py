@@ -58,7 +58,7 @@ async def test_channel_job_transforms_to_simple_english(tmp_path):
         mock_tsvc = mock_tsvc_cls.return_value
         mock_tsvc.get_transcript.return_value = mock_transcript_res
 
-        await manager._run_job(job, force_refresh=False, caption_concurrency=1, whisper_concurrency=1)
+        await manager._run_job(job, force_refresh=False)
 
         assert item.status == "success"
         # Simple English transcript is in item.transcript
@@ -120,7 +120,7 @@ async def test_channel_job_graceful_fallback_on_translation_error(tmp_path):
         mock_tsvc = mock_tsvc_cls.return_value
         mock_tsvc.get_transcript.return_value = mock_transcript_res
 
-        await manager._run_job(job, force_refresh=False, caption_concurrency=1, whisper_concurrency=1)
+        await manager._run_job(job, force_refresh=False)
 
         # Video must still succeed!
         assert item.status == "success"

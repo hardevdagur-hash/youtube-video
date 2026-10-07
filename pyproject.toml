@@ -20,10 +20,15 @@ fix = false
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "ARG", "PT", "S", "C4", "T20"]
-ignore = ["E501"]
+# E501: line length is not enforced. N818: renaming the public exception classes
+# (ApplicationException, QualityCheckFailed) would be churn without benefit.
+ignore = ["E501", "N818"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101", "S311"]
+# Tests: asserts, fixed fake credentials, fakes whose signatures mirror real interfaces.
+"tests/*" = ["S101", "S105", "S106", "S311", "ARG", "PT004", "PT011", "PT018"]
+# CLI tools print to the terminal by design.
+"scripts/*" = ["T201"]
 
 [tool.coverage.run]
 source = ["."]

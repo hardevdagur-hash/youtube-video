@@ -71,11 +71,6 @@ class ManualTranscriptProvider(TranscriptProvider):
             TranscriptsDisabledError: Transcripts disabled.
             VideoUnavailableError: Video unavailable.
         """
-        result = TranscriptResult(
-            video_id=video_id,
-            source=TranscriptSource.MANUAL,
-            provider=TranscriptProviderName.YOUTUBE_MANUAL,
-        )
 
         try:
             preferred = [language] if language else None
@@ -91,7 +86,7 @@ class ManualTranscriptProvider(TranscriptProvider):
             raise
         except Exception as exc:
             logger.warning("Manual transcript fetch failed for %s: %s", video_id, exc)
-            raise NoTranscriptFoundError(f"Manual transcript unavailable: {exc}")
+            raise NoTranscriptFoundError(f"Manual transcript unavailable: {exc}") from exc
 
         if not raw_segments:
             raise NoTranscriptFoundError(f"No manual transcript segments for {video_id}")

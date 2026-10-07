@@ -292,12 +292,7 @@ class TranscriptService:
             "status": "error",
             "detail": "No transcript available from any source.",
         })
-        elapsed = round(time.time() - start_time, 2)
-        error_result = self._build_error_result(
-            video_id,
-            pipeline_steps,
-            elapsed,
-        )
+        error_result = self._build_error_result(video_id, pipeline_steps)
         if getattr(error_result, "error_code", None) not in ("RATE_LIMITED", "NETWORK_ERROR", "TIMEOUT"):
             self._repository.save(error_result)
         logger.debug("All transcript stages failed for %s", video_id)
@@ -334,8 +329,8 @@ class TranscriptService:
                 try:
                     from services.transcript_limiter import transcript_limiter
                     transcript_limiter.record_success(video_id)
-                except Exception:
-                    pass
+                except Exception as limiter_exc:  # pacing bookkeeping must never fail a transcript
+                    logger.warning("Transcript limiter success bookkeeping failed: %s", limiter_exc)
                 step["status"] = "ok"
                 step["detail"] = f"{transcript.source.value} ({transcript.language}, {transcript.word_count} words)"
                 step["result"] = transcript
@@ -348,42 +343,42 @@ class TranscriptService:
         except Exception as exc:
             exc_type = type(exc).__name__
 
-            if isinstance(exc, (TranscriptDisabledError, ClientTranscriptsDisabledError)):
+            if isinstance(exc, TranscriptDisabledError | ClientTranscriptsDisabledError):
                 step["status"] = "skipped"
                 step["detail"] = str(exc)
                 step["error_type"] = "CAPTIONS_DISABLED"
                 return step
 
-            if isinstance(exc, (ClientTooManyRequestsError,)) or "rate limit" in str(exc).lower() or "too many requests" in str(exc).lower() or "429" in str(exc):
+            if isinstance(exc, ClientTooManyRequestsError) or "rate limit" in str(exc).lower() or "too many requests" in str(exc).lower() or "429" in str(exc):
                 try:
                     from services.transcript_limiter import transcript_limiter
                     transcript_limiter.record_rate_limit(video_id)
-                except Exception:
-                    pass
+                except Exception as limiter_exc:
+                    logger.warning("Transcript limiter rate-limit bookkeeping failed: %s", limiter_exc)
                 step["status"] = "skipped"
                 step["detail"] = str(exc)
                 step["error_type"] = "RATE_LIMITED"
                 return step
 
-            if isinstance(exc, (ClientVideoUnavailableError,)):
+            if isinstance(exc, ClientVideoUnavailableError):
                 step["status"] = "skipped"
                 step["detail"] = str(exc)
                 step["error_type"] = "VIDEO_UNAVAILABLE"
                 return step
 
-            if isinstance(exc, (TranscriptUnavailableError, ClientNoTranscriptFoundError)):
+            if isinstance(exc, TranscriptUnavailableError | ClientNoTranscriptFoundError):
                 step["status"] = "skipped"
                 step["detail"] = str(exc)
                 step["error_type"] = "NO_CAPTIONS"
                 return step
 
-            if isinstance(exc, (TranscriptFetchError,)):
+            if isinstance(exc, TranscriptFetchError):
                 step["status"] = "skipped"
                 step["detail"] = str(exc)
                 step["error_type"] = "REQUEST_FAILED"
                 return step
 
-            if isinstance(exc, (AudioDownloadError, TranscriptionError)):
+            if isinstance(exc, AudioDownloadError | TranscriptionError):
                 step["status"] = "error"
                 step["detail"] = f"{exc_type}: {exc}"
                 step["error_type"] = "LIBRARY_ERROR"
@@ -479,7 +474,6 @@ class TranscriptService:
         self,
         video_id: str,
         pipeline_steps: list[dict[str, Any]],
-        elapsed: float,
     ) -> TranscriptResult:
         """Build a failed TranscriptResult when all stages fail."""
         error_code = "NO_CAPTIONS"

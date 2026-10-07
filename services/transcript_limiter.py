@@ -103,7 +103,7 @@ class TranscriptRateLimiter:
             # 2. Enforce minimum request spacing + jitter
             now = time.time()
             elapsed_since_last = now - self._last_request_time
-            jitter_offset = random.uniform(-self.jitter, self.jitter)
+            jitter_offset = random.uniform(-self.jitter, self.jitter)  # noqa: S311 - timing jitter, not crypto
             target_delay = max(0.5, self.min_interval + jitter_offset)
 
             if elapsed_since_last < target_delay:
@@ -139,7 +139,7 @@ class TranscriptRateLimiter:
         # Exponential backoff: base * 2^(consecutive - 1) + jitter
         exponent = min(self._consecutive_rate_limits - 1, 5)
         raw_cooldown = self.cooldown_base * (2 ** exponent)
-        jitter_amount = random.uniform(0.5, 3.0)
+        jitter_amount = random.uniform(0.5, 3.0)  # noqa: S311 - timing jitter, not crypto
         cooldown = min(self.cooldown_max, raw_cooldown + jitter_amount)
 
         self._state = CircuitState.OPEN

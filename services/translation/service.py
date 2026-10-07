@@ -87,7 +87,6 @@ class TranslationService:
         original_text: str,
         target_language: Literal["en", "hi"],
         source_language: str = "en",
-        original_segments: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Translate canonical original transcript into Simple English or Simple Hindi.
 
@@ -96,7 +95,6 @@ class TranslationService:
             original_text: Canonical transcript text.
             target_language: "en" for Simple English, "hi" for Simple Hindi.
             source_language: Original source language of video.
-            original_segments: Optional original timestamped segments.
 
         Returns:
             Dict with translated transcript, word count, cache status.

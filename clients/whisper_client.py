@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 try:
     from services.stt.hardware import setup_cuda_dll_paths
     setup_cuda_dll_paths()
-except Exception:
-    pass
+except Exception as _cuda_exc:  # optional local-STT acceleration only
+    logger.debug("CUDA DLL path setup skipped: %s", _cuda_exc)
 
 _HAS_FASTER_WHISPER = False
 FasterWhisperModel = None
@@ -114,7 +114,7 @@ class FasterWhisperClient(SpeechToTextClient):
                     ) from cpu_exc
             raise WhisperModelError(
                 f"Failed to load Whisper model '{self._model_size}': {exc}"
-            )
+            ) from exc
 
     def _do_transcribe(
         self,
@@ -149,12 +149,12 @@ class FasterWhisperClient(SpeechToTextClient):
             beam_size=5,
             best_of=5,
             vad_filter=True,
-            vad_parameters=dict(
-                threshold=0.5,
-                min_speech_duration_ms=250,
-                max_speech_duration_s=30,
-                min_silence_duration_ms=100,
-            ),
+            vad_parameters={
+                "threshold": 0.5,
+                "min_speech_duration_ms": 250,
+                "max_speech_duration_s": 30,
+                "min_silence_duration_ms": 100,
+            },
         )
 
         segments_list = list(segments_gen)
@@ -270,12 +270,12 @@ class DummyWhisperClient(SpeechToTextClient):
             TranscriptionSegment(start=2.0, end=4.0, text="This is a test transcript."),
         ]
 
-    def transcribe(
+    def transcribe(  # test double: signature matches SpeechToTextClient
         self,
-        audio_path: str,
+        audio_path: str,  # noqa: ARG002
         language: str | None = None,
-        *args: Any,
-        **kwargs: Any,
+        *args: Any,  # noqa: ARG002
+        **kwargs: Any,  # noqa: ARG002
     ) -> TranscriptionResult:
         total_duration = max((s.end for s in self._canned), default=0)
         return TranscriptionResult(

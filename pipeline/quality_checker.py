@@ -29,10 +29,6 @@ class QualityChecker(BaseProcessor):
             context["text"] = self._REPEATED_WORDS.sub(r"\1", text)
             text = context["text"]
 
-        broken = self._BROKEN_SENTENCE.findall(text)
-        malformed = self._MALFORMED_PUNCT.findall(text)
-        excessive_ws = self._EXCESSIVE_WS.findall(text)
-
         quality_pass = len(issues) == 0
         flags.quality_passed = quality_pass
 

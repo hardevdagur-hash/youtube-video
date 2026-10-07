@@ -1,5 +1,6 @@
 """Hardware detection service for Whisper and CTranslate2 acceleration."""
 
+import contextlib
 import logging
 import os
 import platform
@@ -35,18 +36,14 @@ def setup_cuda_dll_paths() -> None:
                     bin_str = str(bin_dir)
                     if bin_str not in os.environ.get("PATH", ""):
                         os.environ["PATH"] = bin_str + os.pathsep + os.environ.get("PATH", "")
-                    try:
+                    with contextlib.suppress(Exception):
                         _DLL_DIRECTORIES.append(os.add_dll_directory(bin_str))
-                    except Exception:
-                        pass
                     # Pre-load known libraries
                     for dll_name in ("cublas64_12.dll", "cudnn64_9.dll"):
                         dll_file = bin_dir / dll_name
                         if dll_file.is_file():
-                            try:
+                            with contextlib.suppress(Exception):
                                 ctypes.CDLL(str(dll_file))
-                            except Exception:
-                                pass
 
 
 # Register CUDA DLLs at import time
@@ -90,8 +87,8 @@ def detect_hardware() -> HardwareInfo:
                 device_name = torch.cuda.get_device_name(0)
                 props = torch.cuda.get_device_properties(0)
                 vram_mb = int(props.total_memory / (1024 * 1024))
-        except Exception:
-            pass
+        except Exception as exc:  # torch is optional (local STT backend only)
+            logger.debug("CUDA device query skipped: %s", exc)
 
     logger.info(
         "Hardware detected: device=%s, compute=%s, name='%s', vram=%sMB, cpus=%d",

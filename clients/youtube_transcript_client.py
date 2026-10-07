@@ -241,18 +241,18 @@ class YouTubeTranscriptClient:
         """
         try:
             return self._api.list(video_id)
-        except VideoUnavailable:
-            raise VideoUnavailableError(f"Video {video_id} is unavailable.")
-        except TranscriptsDisabled:
-            raise TranscriptsDisabledError(f"Transcripts disabled for video {video_id}.")
+        except VideoUnavailable as exc:
+            raise VideoUnavailableError(f"Video {video_id} is unavailable.") from exc
+        except TranscriptsDisabled as exc:
+            raise TranscriptsDisabledError(f"Transcripts disabled for video {video_id}.") from exc
         except TranscriptSslError:
             raise
         except Exception as exc:
             exc_name = type(exc).__name__
             exc_msg = str(exc).lower()
             if "toomanyrequests" in exc_name.lower() or "429" in exc_msg or "too many requests" in exc_msg or "rate limit" in exc_msg:
-                raise TooManyRequestsError("Rate limited by YouTube.")
-            raise YouTubeTranscriptClientError(f"Failed to list transcripts: {exc}")
+                raise TooManyRequestsError("Rate limited by YouTube.") from exc
+            raise YouTubeTranscriptClientError(f"Failed to list transcripts: {exc}") from exc
 
     # ------------------------------------------------------------------
     # Smart transcript enumeration & selection
@@ -594,7 +594,7 @@ class YouTubeTranscriptClient:
         except Exception as exc:
             raise NoTranscriptFoundError(
                 f"No transcript found for video {video_id}: {exc}"
-            )
+            ) from exc
 
     # ------------------------------------------------------------------
     # Shared helpers

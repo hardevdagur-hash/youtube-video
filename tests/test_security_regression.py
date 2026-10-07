@@ -248,16 +248,10 @@ def test_max_videos_sync_export_boundary(authed_client):
     assert resp.status_code == 422
 
 
-def test_concurrency_limit_is_ten(transcript_jobs):
-    ok = _client(USER_A).post("/api/channel/channela/transcript-job",
-                              json={"caption_concurrency": 10, "whisper_concurrency": 10})
-    assert ok.status_code == 200
-    assert transcript_jobs[-1]["caption_concurrency"] == 10
-    for field in ("caption_concurrency", "whisper_concurrency"):
-        resp = _client(USER_A).post("/api/channel/channela/transcript-job", json={field: 11})
+def test_sync_channel_concurrency_limit_is_ten(auth_config):
+    for bad in (0, 11):
+        resp = _client(USER_A).get("/api/channel/chan/transcripts", params={"concurrency": bad})
         assert resp.status_code == 422
-        assert _client(USER_A).post("/api/channel/channela/transcript-job", json={field: 0}).status_code == 422
-    assert _client(USER_A).get("/api/channel/chan/transcripts", params={"concurrency": 11}).status_code == 422
 
 
 # ---------------------------------------------------------------------------

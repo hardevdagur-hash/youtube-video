@@ -141,4 +141,5 @@ class TestYouTubeClientGetService:
         assert service is mock_resource
         http2 = client._http
         assert http2 is not None
+        assert http2 is not first_http  # the failed connection is not reused
         assert mock_build.call_count == 2

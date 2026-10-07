@@ -14,17 +14,8 @@ Implements the exact 8-step pipeline:
 import logging
 import threading
 import time
+import zlib
 from typing import Any
-
-_video_locks: dict[str, threading.Lock] = {}
-_video_locks_mutex = threading.Lock()
-
-
-def _get_video_lock(video_id: str) -> threading.Lock:
-    with _video_locks_mutex:
-        if video_id not in _video_locks:
-            _video_locks[video_id] = threading.Lock()
-        return _video_locks[video_id]
 
 from config.settings import get_settings
 from repositories.transcript_repository import TranscriptRepository
@@ -46,6 +37,16 @@ from services.youtube.captions import (
 from services.youtube.resolver import YouTubeResolver
 
 logger = logging.getLogger(__name__)
+
+# Concurrent requests for the same uncached video wait for one acquisition instead of
+# paying for captions/STT twice. A fixed pool of striped locks bounds memory (a lock
+# per video id would grow forever); unrelated videos rarely share a stripe.
+_LOCK_STRIPES = 64
+_video_lock_stripes = tuple(threading.Lock() for _ in range(_LOCK_STRIPES))
+
+
+def _get_video_lock(video_id: str) -> threading.Lock:
+    return _video_lock_stripes[zlib.crc32(video_id.encode("utf-8")) % _LOCK_STRIPES]
 
 
 class TranscriptService:

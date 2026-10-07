@@ -96,7 +96,7 @@ async def _retention_sweeper(manager) -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     from services.jobs.transcript_job_manager import transcript_job_manager
 
     logger.info(
@@ -524,7 +524,6 @@ async def api_transcript_unified(request: UnifiedTranscriptRequest):
                     original_text=canonical_text,
                     target_language=out_lang,
                     source_language=source_lang,
-                    original_segments=segments,
                 )
                 final_text = trans_result["transcript"]
                 final_segments = trans_result.get("segments", [])
@@ -662,7 +661,7 @@ def _format_duration(total_seconds: int) -> str:
 _sync_channel_runs = 0
 
 
-def _limit_sync_channel_runs(applies=lambda kwargs: True):
+def _limit_sync_channel_runs(applies=lambda _call_kwargs: True):
     """Reject (429) synchronous channel runs beyond MAX_CONCURRENT_SYNC_CHANNEL_RUNS.
 
     Each such request fetches up to MAX_VIDEOS_SYNC_EXPORT transcripts inside one HTTP
@@ -1015,8 +1014,6 @@ async def api_channel_transcripts(
 class TranscriptJobCreateRequest(BaseModel):
     max_videos: int = Field(0, ge=0, le=settings.max_videos_per_job)
     force_refresh: bool = False
-    caption_concurrency: int = Field(1, ge=1, le=_MAX_CONCURRENCY)
-    whisper_concurrency: int = Field(1, ge=1, le=_MAX_CONCURRENCY)
     published_after: str | None = Field(None, max_length=40, pattern=_DATE_PATTERN)
     published_before: str | None = Field(None, max_length=40, pattern=_DATE_PATTERN)
     output_language: str = Field("en", pattern=_OUTPUT_MODE_PATTERN)
@@ -1042,8 +1039,6 @@ async def api_start_channel_transcript_job(
         # 0 means "all eligible videos", bounded by the configured per-job cap
         eff_max = min(eff_max or settings.max_videos_per_job, settings.max_videos_per_job)
         eff_refresh = req.force_refresh if req else force_refresh
-        eff_caption_conc = req.caption_concurrency if req else settings.transcript_max_concurrency
-        eff_whisper_conc = req.whisper_concurrency if req else 1
         eff_pub_after = req.published_after if req and req.published_after else published_after
         eff_pub_before = req.published_before if req and req.published_before else published_before
         eff_out_lang = _normalize_output_mode(req.output_language if req else output_language, "en") or "en"
@@ -1052,8 +1047,6 @@ async def api_start_channel_transcript_job(
             channel_handle=handle,
             max_videos=eff_max,
             force_refresh=eff_refresh,
-            caption_concurrency=eff_caption_conc,
-            whisper_concurrency=eff_whisper_conc,
             published_after=eff_pub_after,
             published_before=eff_pub_before,
             output_language=eff_out_lang,
@@ -1277,7 +1270,7 @@ def _resolve_video_id(url: str) -> str | None:
 
 
 @app.post("/api/transcript/export")
-@_limit_sync_channel_runs(applies=lambda kwargs: bool(kwargs["req"].channel_handle))
+@_limit_sync_channel_runs(applies=lambda call_kwargs: bool(call_kwargs["req"].channel_handle))
 async def api_transcript_csv_export(req: TranscriptExportRequest):
     """Export transcripts as CSV for a single video or entire channel.
 

@@ -69,11 +69,6 @@ class AutoTranscriptProvider(TranscriptProvider):
         Raises:
             NoTranscriptFoundError: No auto transcript available.
         """
-        result = TranscriptResult(
-            video_id=video_id,
-            source=TranscriptSource.AUTO,
-            provider=TranscriptProviderName.YOUTUBE_AUTO,
-        )
 
         try:
             preferred = [language] if language else None
@@ -89,7 +84,7 @@ class AutoTranscriptProvider(TranscriptProvider):
             raise
         except Exception as exc:
             logger.warning("Auto transcript fetch failed for %s: %s", video_id, exc)
-            raise NoTranscriptFoundError(f"Auto transcript unavailable: {exc}")
+            raise NoTranscriptFoundError(f"Auto transcript unavailable: {exc}") from exc
 
         if not raw_segments:
             raise NoTranscriptFoundError(f"No auto transcript segments for {video_id}")

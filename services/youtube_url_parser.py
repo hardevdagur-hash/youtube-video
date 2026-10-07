@@ -166,10 +166,7 @@ class YouTubeURLParser:
         """
         remaining = path
         if prefix:
-            if path.lower().startswith(prefix.lower()):
-                remaining = path[len(prefix):]
-            else:
-                remaining = path
+            remaining = path[len(prefix):] if path.lower().startswith(prefix.lower()) else path
 
         remaining = remaining.strip("/")
         if not remaining:

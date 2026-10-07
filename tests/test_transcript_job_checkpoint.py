@@ -93,7 +93,7 @@ async def test_job_resume_logic(temp_jobs_dir):
     manager._save_checkpoint(job)
 
     # Mock _run_job so it doesn't make live network requests
-    with patch.object(manager, "_run_job") as mock_run:
+    with patch.object(manager, "_run_job"):
         resumed_job = await manager.resume_job("abcdefabcdef")
         assert resumed_job is not None
         assert resumed_job.status == JobStatus.RUNNING

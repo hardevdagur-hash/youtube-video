@@ -73,7 +73,6 @@ def test_post_transcript_defaults_to_simple_english(client):
             original_text="Namaste dosto, aaj hum seekhenge web development.",
             target_language="en",
             source_language="hi",
-            original_segments=canonical_mock["segments"],
         )
 
 

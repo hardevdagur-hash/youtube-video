@@ -381,7 +381,6 @@ URDU_DICT: dict[str, str] = {
     "تم": "tum",
     "تمہیں": "tumhein",
     "تمہारा": "tumhara",
-    "میں": "main",
     "مجھے": "mujhe",
     "میرا": "mera",
     "میرے": "mere",
@@ -451,7 +450,6 @@ URDU_DICT: dict[str, str] = {
     "کریں گے": "karenge",
     "کرینگے": "karenge",
     "کروں گا": "karunga",
-    "کیا": "kiya",
     "کئے": "kiye",
     "کیے": "kiye",
     "لیتے": "lete",
@@ -674,10 +672,7 @@ class HinglishNormalizer:
             # Fallback for unknown Devanagari or Urdu words
             has_deva = bool(_DEVANAGARI_RE.search(core))
             has_urdu = bool(_URDU_ARABIC_RE.search(core))
-            if has_deva or has_urdu:
-                core_trans = anyascii.anyascii(core)
-            else:
-                core_trans = core
+            core_trans = anyascii.anyascii(core) if has_deva or has_urdu else core
 
         return prefix + core_trans + suffix
 
@@ -737,7 +732,7 @@ class HinglishNormalizer:
             raw_text = getattr(seg, "text", "")
             if raw_text:
                 normalized_text = self.normalize(raw_text)
-                setattr(seg, "text", normalized_text)
+                seg.text = normalized_text
         return segments
 
 

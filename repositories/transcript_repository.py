@@ -91,15 +91,14 @@ class TranscriptRepository:
 
         # Check file persistence
         file_path = self._file_for(video_id)
-        if file_path is not None:
-            if file_path.exists():
-                try:
-                    data = json.loads(file_path.read_text(encoding="utf-8"))
-                    self._cache.set(cache_key, data)
-                    logger.debug("Transcript file cache HIT for %s", video_id)
-                    return TranscriptResult(**data)
-                except Exception as exc:
-                    logger.exception("Failed to read persisted transcript for %s: %s", video_id, exc)
+        if file_path is not None and file_path.exists():
+            try:
+                data = json.loads(file_path.read_text(encoding="utf-8"))
+                self._cache.set(cache_key, data)
+                logger.debug("Transcript file cache HIT for %s", video_id)
+                return TranscriptResult(**data)
+            except Exception as exc:
+                logger.exception("Failed to read persisted transcript for %s: %s", video_id, exc)
 
         logger.debug("Transcript cache MISS for %s", video_id)
         return None
@@ -162,15 +161,14 @@ class TranscriptRepository:
 
         # Check disk persistence
         file_path = self._file_for(video_id, language)
-        if file_path is not None:
-            if file_path.exists():
-                try:
-                    data = json.loads(file_path.read_text(encoding="utf-8"))
-                    self._cache.set(cache_key, data)
-                    logger.debug("Translation disk cache HIT for %s/%s", video_id, language)
-                    return TranscriptResult(**data)
-                except Exception as exc:
-                    logger.exception("Failed to read persisted translation for %s/%s: %s", video_id, language, exc)
+        if file_path is not None and file_path.exists():
+            try:
+                data = json.loads(file_path.read_text(encoding="utf-8"))
+                self._cache.set(cache_key, data)
+                logger.debug("Translation disk cache HIT for %s/%s", video_id, language)
+                return TranscriptResult(**data)
+            except Exception as exc:
+                logger.exception("Failed to read persisted translation for %s/%s: %s", video_id, language, exc)
 
         logger.debug("Translation cache MISS for %s/%s", video_id, language)
         return None
