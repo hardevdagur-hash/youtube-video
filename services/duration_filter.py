@@ -4,9 +4,8 @@ Business Rule:
     3:00 <= duration < 30:00 (180 seconds <= duration_seconds < 1800 seconds)
 """
 
-from typing import NamedTuple
-
 import re
+from typing import NamedTuple
 
 MIN_DURATION_SECONDS = 180   # 3 minutes inclusive
 MAX_DURATION_SECONDS = 1800  # 30 minutes exclusive

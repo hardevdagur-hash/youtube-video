@@ -1,14 +1,15 @@
 """Input validation for raw transcripts before processing."""
 
 import logging
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
-from models.transcript import TranscriptSegment
 from exceptions.processing_errors import (
-    ValidationError,
     EmptyTranscriptError,
     ProcessingLimitError,
+    ValidationError,
 )
+from models.transcript import TranscriptSegment
 
 logger = logging.getLogger(__name__)
 

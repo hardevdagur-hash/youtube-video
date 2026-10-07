@@ -1,8 +1,12 @@
 """Unit tests for HinglishNormalizer and Hinglish pipeline integration."""
 
-import pytest
-from services.transliteration.hinglish_normalizer import HinglishNormalizer, hinglish_normalizer
-from models.transcript import TranscriptResult, TranscriptSegment, TranscriptSource, TranscriptProviderName
+from models.transcript import (
+    TranscriptProviderName,
+    TranscriptResult,
+    TranscriptSegment,
+    TranscriptSource,
+)
+from services.transliteration.hinglish_normalizer import hinglish_normalizer
 
 
 class TestHinglishNormalizer:
@@ -117,8 +121,12 @@ class TestTranscriptPipelineHinglishIntegration:
         assert not hinglish_normalizer.contains_non_roman_script(finalized.plain_text)
 
     def test_whisper_provider_hinglish_output(self):
+        from interfaces.speech_to_text import (
+            SpeechToTextClient,
+            TranscriptionResult,
+            TranscriptionSegment,
+        )
         from providers.whisper_provider import WhisperProvider
-        from interfaces.speech_to_text import SpeechToTextClient, TranscriptionResult, TranscriptionSegment
 
         class MockHindiSTTClient(SpeechToTextClient):
             def transcribe(self, audio_path: str, language: str | None = None, initial_prompt: str | None = None) -> TranscriptionResult:
@@ -159,6 +167,7 @@ class TestTranscriptPipelineHinglishIntegration:
     def test_job_manager_csv_export_hinglish(self):
         import csv
         import io
+
         from models.transcript_job import JobStatus, TranscriptJobProgress, TranscriptVideoItem
         from services.jobs.transcript_job_manager import TranscriptJobManager
 

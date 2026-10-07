@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 
-from models.transcript import TranscriptResult, PipelineStep
+from models.transcript import TranscriptResult
 
 
 class TranscriptProvider(ABC):

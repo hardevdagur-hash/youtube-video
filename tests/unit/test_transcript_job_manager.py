@@ -2,7 +2,7 @@
 
 import csv
 import io
-import pytest
+
 from models.transcript_job import JobStatus, TranscriptJobProgress, TranscriptVideoItem
 from services.jobs.transcript_job_manager import TranscriptJobManager
 

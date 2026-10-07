@@ -6,8 +6,7 @@ Every endpoint MUST return responses conforming to these models.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field, asdict
-from typing import Any, Generic, TypeVar
+from typing import Any, TypeVar
 
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel

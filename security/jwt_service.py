@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import jwt
@@ -46,7 +46,7 @@ class JWTService:
 
     def create_access_token(self, user: Any, extra_claims: dict[str, Any] | None = None) -> str:
         """Sign an access token for ``user`` (any object with ``id``/``uuid`` and ``role``)."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         role = getattr(user, "role", "user")
         payload: dict[str, Any] = {
             "sub": str(getattr(user, "uuid", None) or getattr(user, "id", "")),

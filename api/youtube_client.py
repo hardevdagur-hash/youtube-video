@@ -7,17 +7,15 @@ Uses googleapiclient with a patched httplib2 that:
 """
 
 import logging
-import socket
 import ssl
 import time
-from typing import Any
 
 import httplib2
-from googleapiclient.discovery import build, Resource
+from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 
 from config.settings import settings
-from utils.ssl_config import get_ca_bundle_path, create_ssl_context
+from utils.ssl_config import get_ca_bundle_path
 
 logger = logging.getLogger(__name__)
 
@@ -190,8 +188,7 @@ class YouTubeClient:
                     f"HTTP error during client initialization: {e}"
                 ) from e
 
-            except (ssl.SSLError, ssl.SSLZeroReturnError, ssl.SSLEOFError,
-                    ConnectionError, OSError, socket.timeout) as e:
+            except (TimeoutError, ssl.SSLError, ssl.SSLZeroReturnError, ssl.SSLEOFError, ConnectionError, OSError) as e:
                 last_error = e
                 logger.warning(
                     "SSL/Connection error (attempt %d/%d): %s",

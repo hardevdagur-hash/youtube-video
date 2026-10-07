@@ -1,9 +1,9 @@
 """Unit tests for transcript utilities."""
 
-from utils.text_cleaner import TextCleaner
+from models.transcript import TranscriptSegment
 from utils.language_detector import LanguageDetector
 from utils.read_time import estimate_read_time
-from models.transcript import TranscriptSegment
+from utils.text_cleaner import TextCleaner
 
 
 class TestTextCleaner:

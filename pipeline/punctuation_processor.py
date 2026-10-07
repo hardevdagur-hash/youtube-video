@@ -1,8 +1,9 @@
 """Punctuation restoration processor."""
 import re
 from typing import Any
-from pipeline.base_processor import BaseProcessor
+
 from models.processing_result import ProcessingStepName
+from pipeline.base_processor import BaseProcessor
 
 
 class PunctuationProcessor(BaseProcessor):

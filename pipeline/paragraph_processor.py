@@ -1,8 +1,9 @@
 """Paragraph detection processor — splits transcript into logical paragraphs."""
 import re
 from typing import Any
-from pipeline.base_processor import BaseProcessor
+
 from models.processing_result import ProcessingStepName
+from pipeline.base_processor import BaseProcessor
 
 
 class ParagraphProcessor(BaseProcessor):

@@ -3,7 +3,6 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi.testclient import TestClient
 
 from models.transcript_job import JobStatus, TranscriptJobProgress
 from services.jobs.transcript_job_manager import (
@@ -11,7 +10,6 @@ from services.jobs.transcript_job_manager import (
     parse_date_boundary,
     parse_published_at,
 )
-from webapp.main import app
 
 
 @pytest.fixture

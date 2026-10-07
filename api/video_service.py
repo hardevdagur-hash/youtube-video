@@ -1,5 +1,6 @@
 """Service for communicating with YouTube Data API for video/playlist operations."""
 
+import http.client
 import logging
 import socket
 import ssl
@@ -8,8 +9,7 @@ from typing import Any
 
 from googleapiclient.errors import HttpError
 
-import http.client
-from api.youtube_client import YouTubeClient, YouTubeAPIClientError, YouTubeAPISslError
+from api.youtube_client import YouTubeAPIClientError, YouTubeAPISslError, YouTubeClient
 from utils.retry import retry
 
 logger = logging.getLogger(__name__)

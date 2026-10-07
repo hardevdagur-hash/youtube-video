@@ -1,7 +1,6 @@
 """Unit tests for EnglishConverter."""
 
-import pytest
-from services.english_converter import EnglishConverter, english_converter
+from services.english_converter import english_converter
 
 
 class TestEnglishConverter:

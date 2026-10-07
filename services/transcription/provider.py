@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
@@ -17,7 +17,7 @@ class TranscriptionSegment:
         if self.duration == 0.0 and self.end > self.start:
             self.duration = round(self.end - self.start, 2)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "start": round(self.start, 2),
             "end": round(self.end, 2),
@@ -29,7 +29,7 @@ class TranscriptionSegment:
 @dataclass
 class TranscriptionResult:
     text: str
-    segments: List[TranscriptionSegment] = field(default_factory=list)
+    segments: list[TranscriptionSegment] = field(default_factory=list)
     language: str = "en"
     duration: float = 0.0
     confidence: float = 1.0
@@ -41,7 +41,7 @@ class TranscriptionProvider(ABC):
 
     @abstractmethod
     def transcribe(
-        self, audio_path: Path, language: Optional[str] = None
+        self, audio_path: Path, language: str | None = None
     ) -> TranscriptionResult:
         """Transcribe an audio file into text and timestamps.
 

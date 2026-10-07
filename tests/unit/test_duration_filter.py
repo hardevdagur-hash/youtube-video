@@ -1,12 +1,9 @@
 """Unit tests for YouTube video duration filtering rules."""
 
-import pytest
 from services.duration_filter import (
     evaluate_duration,
-    parse_iso_duration,
     format_duration,
-    MIN_DURATION_SECONDS,
-    MAX_DURATION_SECONDS,
+    parse_iso_duration,
 )
 
 

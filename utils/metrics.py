@@ -1,10 +1,8 @@
 """Readability and transcript statistics computation."""
 
-import math
-import re
 
 from utils.read_time import estimate_read_time as _estimate_read_time
-from utils.text_utils import count_words, count_sentences, split_sentences
+from utils.text_utils import count_sentences, count_words, split_sentences
 
 
 def compute_statistics(

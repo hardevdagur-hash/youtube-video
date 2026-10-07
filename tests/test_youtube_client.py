@@ -1,15 +1,15 @@
 """Tests for api/youtube_client.py"""
 
 import ssl
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from api.youtube_client import (
-    YouTubeClient,
     YouTubeAPIClientError,
     YouTubeAPISslError,
     YouTubeAPITimeoutError,
+    YouTubeClient,
     _patch_httplib2,
 )
 
@@ -18,12 +18,11 @@ class TestHttplib2Patching:
     def test_patch_applied_once(self):
         _patch_httplib2()
         _patch_httplib2()  # second call should be no-op
-        import httplib2
         # Verify the patched __init__ uses certifi
-        from utils.ssl_config import get_ca_bundle_path
 
     def test_patched_init_sets_ca_certs(self):
         import httplib2
+
         from utils.ssl_config import get_ca_bundle_path
         ca_path = get_ca_bundle_path()
         http = httplib2.Http()

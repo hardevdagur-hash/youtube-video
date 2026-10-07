@@ -1,10 +1,9 @@
 """Groq Whisper Large V3 Speech-to-Text provider."""
 
 import logging
-import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from config.settings import get_settings
 from services.transcription.provider import (
@@ -51,10 +50,10 @@ class GroqWhisperProvider(TranscriptionProvider):
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
-        model: Optional[str] = None,
-        timeout: Optional[int] = None,
-        max_retries: Optional[int] = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        timeout: int | None = None,
+        max_retries: int | None = None,
     ) -> None:
         settings = get_settings()
         self.api_key = api_key if api_key is not None else getattr(settings, "groq_api_key", "")
@@ -81,7 +80,7 @@ class GroqWhisperProvider(TranscriptionProvider):
         return self._client
 
     def transcribe(
-        self, audio_path: Path, language: Optional[str] = None
+        self, audio_path: Path, language: str | None = None
     ) -> TranscriptionResult:
         """Transcribe an audio file using Groq Whisper Large V3.
 
@@ -123,11 +122,11 @@ class GroqWhisperProvider(TranscriptionProvider):
             language or "auto",
         )
 
-        last_exc: Optional[Exception] = None
+        last_exc: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
             try:
                 with open(audio_path, "rb") as audio_file:
-                    kwargs: Dict[str, Any] = {
+                    kwargs: dict[str, Any] = {
                         "file": (audio_path.name, audio_file),
                         "model": self.model,
                         "response_format": "verbose_json",
@@ -207,7 +206,7 @@ class GroqWhisperProvider(TranscriptionProvider):
             detected_lang = "en"
             duration = 0.0
 
-        segments: List[TranscriptionSegment] = []
+        segments: list[TranscriptionSegment] = []
         for s in raw_segments:
             if isinstance(s, dict):
                 s_start = float(s.get("start", 0.0))

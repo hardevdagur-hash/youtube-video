@@ -14,7 +14,7 @@ Implements the exact 8-step pipeline:
 import logging
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 _video_locks: dict[str, threading.Lock] = {}
 _video_locks_mutex = threading.Lock()
@@ -27,29 +27,23 @@ def _get_video_lock(video_id: str) -> threading.Lock:
         return _video_locks[video_id]
 
 from config.settings import get_settings
-from exceptions import YouTubeURLError
 from repositories.transcript_repository import TranscriptRepository
-from services.youtube.resolver import YouTubeResolver
-from services.youtube.captions import (
-    YouTubeCaptionsService,
-    CaptionsUnavailableError,
+from services.transcription.cleaner import TranscriptCleaner
+from services.transcription.groq import (
+    GroqWhisperProvider,
+)
+from services.transcription.provider import TranscriptionProvider
+from services.transcription.validator import (
+    TranscriptValidator,
 )
 from services.youtube.audio import (
     YouTubeAudioExtractor,
-    AudioExtractionError,
 )
-from services.transcription.provider import TranscriptionProvider
-from services.transcription.groq import (
-    GroqWhisperProvider,
-    GroqTranscriptionError,
-    GroqAuthError,
+from services.youtube.captions import (
+    CaptionsUnavailableError,
+    YouTubeCaptionsService,
 )
-from services.transcription.cleaner import TranscriptCleaner
-from services.transcription.validator import (
-    TranscriptValidator,
-    TranscriptValidationError,
-    TranscriptEmptyError,
-)
+from services.youtube.resolver import YouTubeResolver
 
 logger = logging.getLogger(__name__)
 
@@ -59,13 +53,13 @@ class TranscriptService:
 
     def __init__(
         self,
-        resolver: Optional[YouTubeResolver] = None,
-        captions_service: Optional[YouTubeCaptionsService] = None,
-        audio_extractor: Optional[YouTubeAudioExtractor] = None,
-        transcription_provider: Optional[TranscriptionProvider] = None,
-        cleaner: Optional[TranscriptCleaner] = None,
-        validator: Optional[TranscriptValidator] = None,
-        repository: Optional[TranscriptRepository] = None,
+        resolver: YouTubeResolver | None = None,
+        captions_service: YouTubeCaptionsService | None = None,
+        audio_extractor: YouTubeAudioExtractor | None = None,
+        transcription_provider: TranscriptionProvider | None = None,
+        cleaner: TranscriptCleaner | None = None,
+        validator: TranscriptValidator | None = None,
+        repository: TranscriptRepository | None = None,
     ) -> None:
         settings = get_settings()
         self.resolver = resolver or YouTubeResolver()
@@ -83,7 +77,7 @@ class TranscriptService:
         )
 
     @staticmethod
-    def _build_cache_response(video_id: str, cached_result) -> Dict[str, Any]:
+    def _build_cache_response(video_id: str, cached_result) -> dict[str, Any]:
         logger.info("[Step 2] Cache HIT for canonical transcript %s", video_id)
         segments = [
             {
@@ -110,8 +104,8 @@ class TranscriptService:
     def get_canonical_transcript(
         self,
         video_url_or_id: str,
-        preferred_languages: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        preferred_languages: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Fetch or generate canonical original transcript for a YouTube video.
 
         Follows Step 1 through Step 8 strictly.
@@ -153,13 +147,13 @@ class TranscriptService:
         self,
         video_id: str,
         start_time: float,
-        preferred_languages: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
-        raw_segments: List[Dict[str, Any]] = []
+        preferred_languages: list[str] | None = None,
+    ) -> dict[str, Any]:
+        raw_segments: list[dict[str, Any]] = []
         raw_text: str = ""
         source_language: str = "en"
         source_provider: str = ""
-        duration_seconds: Optional[float] = None
+        duration_seconds: float | None = None
 
         # STEP 3: Try YouTube Captions
         captions_available = False

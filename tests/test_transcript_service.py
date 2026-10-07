@@ -4,18 +4,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from clients.youtube_transcript_client import NoTranscriptFoundError
+from exceptions.transcript_errors import InvalidVideoIdError
+from interfaces.speech_to_text import TranscriptionResult, TranscriptionSegment
+from interfaces.transcript_provider import TranscriptProvider
 from models.transcript import (
+    TranscriptProviderName,
     TranscriptResult,
     TranscriptSegment,
     TranscriptSource,
-    TranscriptProviderName,
-    PipelineStep,
 )
-from exceptions.transcript_errors import InvalidVideoIdError
-from interfaces.transcript_provider import TranscriptProvider
-from interfaces.speech_to_text import TranscriptionResult, TranscriptionSegment
-from clients.youtube_transcript_client import NoTranscriptFoundError
-
 
 # ─── Mock Providers ───────────────────────────────────────────────
 

@@ -44,10 +44,14 @@ from pydantic import BaseModel, Field
 
 from config.settings import is_youtube_api_key_valid, settings
 from infrastructure.logging import setup_logging
-from infrastructure.request_context import current_request_id, new_request_id, request_id_var, user_var
+from infrastructure.request_context import (
+    current_request_id,
+    new_request_id,
+    request_id_var,
+    user_var,
+)
 from infrastructure.validation import RequestValidationMiddleware
 from models.api_response import error_response, success_response
-from services.csv_safety import safe_csv_row
 from security.web_auth import (
     SESSION_COOKIE,
     AuthMiddleware,
@@ -57,6 +61,7 @@ from security.web_auth import (
     can_access_owned,
     cors_options,
 )
+from services.csv_safety import safe_csv_row
 from services.english_converter import english_converter
 
 setup_logging()

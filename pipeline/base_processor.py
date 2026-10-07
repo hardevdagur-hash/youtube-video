@@ -6,8 +6,8 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import Any, ClassVar
 
-from models.processing_result import ProcessingStep, ProcessingStatus, ProcessingStepName
 from exceptions.processing_errors import ProcessorError
+from models.processing_result import ProcessingStatus, ProcessingStep, ProcessingStepName
 
 logger = logging.getLogger(__name__)
 

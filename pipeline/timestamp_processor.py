@@ -1,9 +1,9 @@
 """Timestamp removal processor."""
 import re
 from typing import Any
-from pipeline.base_processor import BaseProcessor
-from models.processing_result import ProcessingStepName
 
+from models.processing_result import ProcessingStepName
+from pipeline.base_processor import BaseProcessor
 
 _TIMESTAMP_RE = re.compile(
     r"\b\d{1,2}:\d{2}(?::\d{2})?\b"

@@ -6,7 +6,7 @@ Preserves original meaning and ordering.
 
 import re
 import unicodedata
-from typing import Sequence
+from collections.abc import Sequence
 
 from models.transcript import TranscriptSegment
 

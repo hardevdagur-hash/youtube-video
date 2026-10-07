@@ -2,7 +2,6 @@
 
 import logging
 import re
-from typing import Tuple
 
 from exceptions import YouTubeURLError
 from services.youtube_url_parser import YouTubeURLParser

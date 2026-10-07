@@ -1,6 +1,7 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -66,7 +67,7 @@ class TranscriptResult(BaseModel):
     word_count: int = Field(default=0)
     character_count: int = Field(default=0)
     estimated_read_time: str = Field(default="")
-    generated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    generated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     duration_seconds: float | None = Field(default=None)
     whisper_info: WhisperProcessingInfo | None = Field(default=None)
     pipeline_steps: list[PipelineStep] = Field(default_factory=list)

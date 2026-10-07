@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import time
-from unittest.mock import MagicMock
-
 import pytest
-from datetime import datetime, timedelta
 
 
 class TestSecurityModels:
@@ -15,7 +11,7 @@ class TestSecurityModels:
         assert user.role == UserRole.EDITOR
 
     def test_security_event(self):
-        from security.security_models import SecurityEvent, ThreatType, AlertSeverity
+        from security.security_models import AlertSeverity, SecurityEvent, ThreatType
         event = SecurityEvent(event_type="login_attempt", actor_id="a1", action="login", threat_type=ThreatType.CREDENTIAL_STUFFING, severity=AlertSeverity.INFO)
         assert event.event_type == "login_attempt"
 
@@ -30,7 +26,7 @@ class TestSecurityModels:
         assert session.status == SessionStatus.ACTIVE
 
     def test_enums(self):
-        from security.security_models import UserRole, ThreatType, AlertSeverity
+        from security.security_models import AlertSeverity, ThreatType, UserRole
         assert UserRole.SUPER_ADMIN.value == "super_admin"
         assert ThreatType.BRUTE_FORCE.value == "brute_force"
         assert AlertSeverity.CRITICAL.value == "critical"

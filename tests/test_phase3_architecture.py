@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -132,7 +132,7 @@ def _age(path, days: float) -> None:
 def test_retention_deletes_only_old_non_running_jobs(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "job_retention_days", 30)
     manager = TranscriptJobManager(jobs_dir=tmp_path)
-    old_ts = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+    old_ts = (datetime.now(UTC) - timedelta(days=40)).isoformat()
     for job_id, status in (("f00000000001", JobStatus.COMPLETED), ("f00000000002", JobStatus.RUNNING),
                            ("f00000000003", JobStatus.PAUSED), ("f00000000004", JobStatus.COMPLETED)):
         manager._save_checkpoint(_job(job_id, status))

@@ -11,8 +11,8 @@ class TestTranscriptValidator:
         tv.validate_text(data["plain_text"])
 
     def test_empty_transcript(self):
-        from validators import transcript_validator as tv
         from exceptions.processing_errors import EmptyTranscriptError
+        from validators import transcript_validator as tv
         data = {"plain_text": "", "segments": []}
         with pytest.raises(EmptyTranscriptError):
             tv.validate_segments(data["segments"])
@@ -24,8 +24,8 @@ class TestTranscriptValidator:
         tv.validate_segments(data["segments"])
 
     def test_missing_segments(self):
-        from validators import transcript_validator as tv
         from exceptions.processing_errors import EmptyTranscriptError
+        from validators import transcript_validator as tv
         data = {"plain_text": "Some text"}
         with pytest.raises(EmptyTranscriptError):
             tv.validate_segments(data.get("segments", []))
@@ -37,8 +37,8 @@ class TestTranscriptValidator:
         tv.validate_text(data["plain_text"])
 
     def test_quality_score_empty(self):
-        from validators import transcript_validator as tv
         from exceptions.processing_errors import EmptyTranscriptError
+        from validators import transcript_validator as tv
         data = {"plain_text": "", "segments": []}
         with pytest.raises(EmptyTranscriptError):
             tv.validate_segments(data["segments"])

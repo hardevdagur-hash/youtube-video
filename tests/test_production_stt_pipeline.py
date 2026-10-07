@@ -1,32 +1,26 @@
 """Comprehensive automated test suite for Production Transcript & Translation Architecture."""
 
-import pytest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
+
+import pytest
 
 from exceptions import YouTubeURLError
-from services.youtube.resolver import YouTubeResolver
-from services.youtube.captions import YouTubeCaptionsService, CaptionsUnavailableError
-from services.youtube.audio import YouTubeAudioExtractor, AudioExtractionError
-from services.transcription.provider import TranscriptionResult, TranscriptionSegment
-from services.transcription.groq import (
-    GroqWhisperProvider,
-    GroqAuthError,
-    GroqRateLimitError,
-    GroqTimeoutError,
-    GroqTranscriptionError,
-)
-from services.transcription.cleaner import TranscriptCleaner
-from services.transcription.validator import (
-    TranscriptValidator,
-    TranscriptEmptyError,
-    TranscriptValidationError,
-)
-from services.transcription.service import TranscriptService
-from services.translation.service import TranslationService
 from repositories.transcript_repository import TranscriptRepository
 from services.transcript_metrics import TranscriptMetricsTracker
-
+from services.transcription.cleaner import TranscriptCleaner
+from services.transcription.groq import (
+    GroqAuthError,
+    GroqWhisperProvider,
+)
+from services.transcription.validator import (
+    TranscriptEmptyError,
+    TranscriptValidationError,
+    TranscriptValidator,
+)
+from services.translation.service import TranslationService
+from services.youtube.captions import CaptionsUnavailableError, YouTubeCaptionsService
+from services.youtube.resolver import YouTubeResolver
 
 # ---------------------------------------------------------------------------
 # 1. YouTube Resolver Tests

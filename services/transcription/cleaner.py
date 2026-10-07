@@ -2,7 +2,7 @@
 
 import logging
 import unicodedata
-from typing import Any, Dict, List
+from typing import Any
 
 from services.transcript_processor import TranscriptProcessor
 
@@ -25,10 +25,10 @@ class TranscriptCleaner:
 
     def clean(
         self,
-        raw_segments: List[Dict[str, Any]],
+        raw_segments: list[dict[str, Any]],
         video_id: str = "",
         raw_text: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Clean raw segments and return structured normalized text and segments.
 
         Args:
@@ -45,7 +45,7 @@ class TranscriptCleaner:
               - 'character_count': Total character count
         """
         # Ensure unicode normalization on all raw segment texts
-        normalized_segments: List[Dict[str, Any]] = []
+        normalized_segments: list[dict[str, Any]] = []
         for s in raw_segments:
             text = unicodedata.normalize("NFC", str(s.get("text", "")).strip())
             if not text:

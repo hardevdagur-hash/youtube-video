@@ -10,7 +10,13 @@ import logging
 import pytest
 
 from infrastructure.logging import ContextTextFormatter, StructuredFormatter
-from infrastructure.request_context import ContextFilter, job_id_var, new_request_id, request_id_var, user_var
+from infrastructure.request_context import (
+    ContextFilter,
+    job_id_var,
+    new_request_id,
+    request_id_var,
+    user_var,
+)
 
 
 def _record(msg: str = "hello %s", args=("world",)) -> logging.LogRecord:

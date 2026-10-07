@@ -1,13 +1,15 @@
 """Enhanced language detection processor with mixed-language support."""
 import logging
 from typing import Any
+
+from models.processing_result import LanguageDistribution, ProcessingStepName
 from pipeline.base_processor import BaseProcessor
-from models.processing_result import ProcessingStepName, LanguageDistribution
 
 logger = logging.getLogger(__name__)
 
 try:
-    from langdetect import detect as langdetect_detect, DetectorFactory, LangDetectException
+    from langdetect import DetectorFactory, LangDetectException
+    from langdetect import detect as langdetect_detect
     DetectorFactory.seed = 42
     _HAS_LANGDETECT = True
 except ImportError:

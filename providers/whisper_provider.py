@@ -1,34 +1,30 @@
 """Stage 3: Whisper speech-to-text fallback provider."""
 
 import logging
-import os
 import time
-from pathlib import Path
 from typing import Any
 
-from models.transcript import (
-    TranscriptResult,
-    TranscriptSource,
-    TranscriptProviderName,
-    WhisperProcessingInfo,
-    TranscriptSegment,
-)
-from interfaces.transcript_provider import TranscriptProvider
-from interfaces.speech_to_text import SpeechToTextClient
 from clients.whisper_client import FasterWhisperClient
-from services.audio.audio_service import AudioService
-from services.stt.hardware import detect_hardware
 from config.settings import get_settings
 from exceptions.transcript_errors import (
     AudioDownloadError,
     TranscriptionError,
-    TranscriptCleanupError,
 )
-from utils.text_cleaner import TextCleaner
+from interfaces.speech_to_text import SpeechToTextClient
+from interfaces.transcript_provider import TranscriptProvider
+from models.transcript import (
+    TranscriptProviderName,
+    TranscriptResult,
+    TranscriptSegment,
+    TranscriptSource,
+    WhisperProcessingInfo,
+)
+from services.audio.audio_service import AudioService
+from services.english_converter import english_converter
+from services.stt.hardware import detect_hardware
 from utils.language_detector import LanguageDetector
 from utils.read_time import estimate_read_time
-from services.transliteration import hinglish_normalizer
-from services.english_converter import english_converter
+from utils.text_cleaner import TextCleaner
 
 logger = logging.getLogger(__name__)
 

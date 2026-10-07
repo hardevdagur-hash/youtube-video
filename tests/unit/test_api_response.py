@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from models.api_response import (
-    APIResponse,
     ErrorDetail,
     error_response,
     http_status_for,

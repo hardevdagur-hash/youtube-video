@@ -1,8 +1,8 @@
 """YouTube service package."""
 
+from services.youtube.audio import AudioExtractionError, YouTubeAudioExtractor
+from services.youtube.captions import CaptionsUnavailableError, YouTubeCaptionsService
 from services.youtube.resolver import YouTubeResolver
-from services.youtube.captions import YouTubeCaptionsService, CaptionsUnavailableError
-from services.youtube.audio import YouTubeAudioExtractor, AudioExtractionError
 
 __all__ = [
     "YouTubeResolver",

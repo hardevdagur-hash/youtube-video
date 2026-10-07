@@ -1,7 +1,6 @@
 """Unit tests for Whisper STT hardware auto-detection."""
 
-import pytest
-from services.stt.hardware import detect_hardware, HardwareInfo
+from services.stt.hardware import HardwareInfo, detect_hardware
 
 
 def test_detect_hardware_returns_valid_info():

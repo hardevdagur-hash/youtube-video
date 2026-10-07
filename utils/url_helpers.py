@@ -1,7 +1,7 @@
 """URL helper utilities for YouTube URL parsing and normalization."""
 
-import re
 import logging
+import re
 from urllib.parse import parse_qs, urlparse
 
 from exceptions import YouTubeURLError

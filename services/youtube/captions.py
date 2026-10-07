@@ -1,15 +1,14 @@
 """YouTube Caption fetching service."""
 
 import logging
-from typing import Any, List, Optional, Tuple
 
 from clients.youtube_transcript_client import (
-    YouTubeTranscriptClient,
-    YouTubeTranscriptClientError,
     NoTranscriptFoundError,
+    TooManyRequestsError,
     TranscriptsDisabledError,
     VideoUnavailableError,
-    TooManyRequestsError,
+    YouTubeTranscriptClient,
+    YouTubeTranscriptClientError,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,12 +31,12 @@ class YouTubeCaptionsService:
     triggering the Groq Whisper fallback.
     """
 
-    def __init__(self, client: Optional[YouTubeTranscriptClient] = None) -> None:
+    def __init__(self, client: YouTubeTranscriptClient | None = None) -> None:
         self._client = client or YouTubeTranscriptClient()
 
     def fetch_captions(
-        self, video_id: str, preferred_languages: Optional[List[str]] = None
-    ) -> Tuple[List[dict], str, bool]:
+        self, video_id: str, preferred_languages: list[str] | None = None
+    ) -> tuple[list[dict], str, bool]:
         """Attempt to fetch captions from YouTube for the given video ID.
 
         Args:

@@ -5,7 +5,7 @@ import os
 import platform
 import sys
 from pathlib import Path
-from typing import NamedTuple, Any
+from typing import Any, NamedTuple
 
 logger = logging.getLogger(__name__)
 

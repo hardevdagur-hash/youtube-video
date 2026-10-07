@@ -5,8 +5,6 @@ Ensures temporary audio files are safely cleaned up after transcription.
 """
 
 import logging
-import os
-import shutil
 import tempfile
 from pathlib import Path
 

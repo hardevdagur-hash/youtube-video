@@ -1,11 +1,10 @@
 """Unit tests for transcript providers with mocked clients."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from models.transcript import TranscriptSource, TranscriptProviderName, TranscriptSegment
-
+from models.transcript import TranscriptProviderName, TranscriptSegment, TranscriptSource
 
 # ─── Fixtures ──────────────────────────────────────────────────────
 
@@ -57,8 +56,8 @@ class TestManualTranscriptProvider:
 
     def test_manual_transcript_empty_segments(self, mock_youtube_client):
         mock_youtube_client.find_best_transcript.return_value = ([], "en", True, None)
-        from providers.manual_transcript_provider import ManualTranscriptProvider
         from clients.youtube_transcript_client import NoTranscriptFoundError
+        from providers.manual_transcript_provider import ManualTranscriptProvider
 
         provider = ManualTranscriptProvider(client=mock_youtube_client)
         with pytest.raises(NoTranscriptFoundError):
@@ -66,8 +65,8 @@ class TestManualTranscriptProvider:
 
     def test_manual_transcript_fetch_failure(self, mock_youtube_client):
         mock_youtube_client.find_best_transcript.side_effect = Exception("API failure")
-        from providers.manual_transcript_provider import ManualTranscriptProvider
         from clients.youtube_transcript_client import NoTranscriptFoundError
+        from providers.manual_transcript_provider import ManualTranscriptProvider
 
         provider = ManualTranscriptProvider(client=mock_youtube_client)
         with pytest.raises(NoTranscriptFoundError):
@@ -97,8 +96,8 @@ class TestAutoTranscriptProvider:
 
     def test_auto_transcript_empty(self, mock_youtube_client):
         mock_youtube_client.find_best_transcript.return_value = ([], "en", False, None)
-        from providers.auto_transcript_provider import AutoTranscriptProvider
         from clients.youtube_transcript_client import NoTranscriptFoundError
+        from providers.auto_transcript_provider import AutoTranscriptProvider
 
         provider = AutoTranscriptProvider(client=mock_youtube_client)
         with pytest.raises(NoTranscriptFoundError):

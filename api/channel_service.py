@@ -5,7 +5,7 @@ from typing import Any
 
 from googleapiclient.errors import HttpError
 
-from api.youtube_client import YouTubeClient, YouTubeAPIClientError
+from api.youtube_client import YouTubeAPIClientError, YouTubeClient
 
 logger = logging.getLogger(__name__)
 

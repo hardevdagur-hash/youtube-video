@@ -1,4 +1,4 @@
 """Configuration module package initialization."""
-from .settings import settings, ConfigurationError
+from .settings import ConfigurationError, settings
 
 __all__ = ["settings", "ConfigurationError"]

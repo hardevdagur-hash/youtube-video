@@ -4,13 +4,13 @@ import logging
 import re
 import threading
 import time
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 
 from config.settings import get_settings
 from repositories.transcript_repository import TranscriptRepository
+from services.transcription.groq import GroqAuthError
 from services.translation.english import SIMPLE_ENGLISH_SYSTEM_PROMPT
 from services.translation.hindi import SIMPLE_HINDI_SYSTEM_PROMPT
-from services.transcription.groq import GroqAuthError
 
 logger = logging.getLogger(__name__)
 
@@ -61,9 +61,9 @@ class TranslationService:
 
     def __init__(
         self,
-        repository: Optional[TranscriptRepository] = None,
-        api_key: Optional[str] = None,
-        model: Optional[str] = None,
+        repository: TranscriptRepository | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
     ) -> None:
         settings = get_settings()
         self.repository = repository or TranscriptRepository(persist_dir=str(settings.transcript_cache_dir))
@@ -87,8 +87,8 @@ class TranslationService:
         original_text: str,
         target_language: Literal["en", "hi"],
         source_language: str = "en",
-        original_segments: Optional[List[Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
+        original_segments: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """Translate canonical original transcript into Simple English or Simple Hindi.
 
         Args:

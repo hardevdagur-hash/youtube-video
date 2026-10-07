@@ -2,12 +2,10 @@
 
 import contextlib
 import logging
-import os
-import shutil
 import tempfile
 import uuid
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator, Optional
 
 import yt_dlp
 
@@ -26,7 +24,7 @@ class AudioExtractionError(Exception):
 class YouTubeAudioExtractor:
     """Extracts lightweight audio stream from YouTube videos for STT processing."""
 
-    def __init__(self, temp_dir: Optional[Path | str] = None) -> None:
+    def __init__(self, temp_dir: Path | str | None = None) -> None:
         if temp_dir:
             self.temp_dir = Path(temp_dir)
         else:
@@ -97,7 +95,7 @@ class YouTubeAudioExtractor:
                 error_code="AUDIO_EXTRACTION_FAILED",
             ) from exc
 
-    def cleanup(self, audio_path: Optional[Path | str]) -> None:
+    def cleanup(self, audio_path: Path | str | None) -> None:
         """Safely delete temporary audio file."""
         if not audio_path:
             return
@@ -112,7 +110,7 @@ class YouTubeAudioExtractor:
     @contextlib.contextmanager
     def audio_context(self, video_id: str) -> Generator[Path, None, None]:
         """Context manager that downloads audio and guarantees cleanup on exit."""
-        audio_path: Optional[Path] = None
+        audio_path: Path | None = None
         try:
             audio_path = self.extract_audio(video_id)
             yield audio_path

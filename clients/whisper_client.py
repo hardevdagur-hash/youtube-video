@@ -6,16 +6,15 @@ Abstracted behind SpeechToTextClient interface for future provider swaps.
 import logging
 import os
 import time
-import tempfile
 from pathlib import Path
 from typing import Any
 
+from exceptions.transcript_errors import TranscriptionError, WhisperModelError
 from interfaces.speech_to_text import (
     SpeechToTextClient,
     TranscriptionResult,
     TranscriptionSegment,
 )
-from exceptions.transcript_errors import TranscriptionError, WhisperModelError
 
 logger = logging.getLogger(__name__)
 

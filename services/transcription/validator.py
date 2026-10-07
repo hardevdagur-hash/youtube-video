@@ -1,9 +1,8 @@
 """Transcript quality validation and hallucination detection."""
 
 import logging
-import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +27,7 @@ class ValidationReport:
     word_count: int
     character_count: int
     confidence: float
-    issues: List[str] = field(default_factory=list)
+    issues: list[str] = field(default_factory=list)
 
 
 class TranscriptValidator:
@@ -37,8 +36,8 @@ class TranscriptValidator:
     def validate(
         self,
         text: str,
-        segments: Optional[List[Dict[str, Any]]] = None,
-        duration_seconds: Optional[float] = None,
+        segments: list[dict[str, Any]] | None = None,
+        duration_seconds: float | None = None,
     ) -> ValidationReport:
         """Validate transcript text and segments.
 
@@ -65,7 +64,7 @@ class TranscriptValidator:
         if word_count == 0:
             raise TranscriptEmptyError("Transcript contains 0 words.")
 
-        issues: List[str] = []
+        issues: list[str] = []
 
         # 1. Extreme brevity check
         if word_count < 3 and (duration_seconds is None or duration_seconds > 30):
@@ -102,7 +101,7 @@ class TranscriptValidator:
             issues=issues,
         )
 
-    def _detect_repetition_loops(self, words: List[str]) -> Optional[str]:
+    def _detect_repetition_loops(self, words: list[str]) -> str | None:
         """Detect degenerate ASR repetition loops (e.g. same 3-word n-gram repeated 5+ times)."""
         if len(words) < 15:
             return None

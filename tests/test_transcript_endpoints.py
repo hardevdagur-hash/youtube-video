@@ -2,11 +2,9 @@
 
 import csv
 import io
-import pytest
-from unittest.mock import patch, MagicMock
-from fastapi.testclient import TestClient
 
-from webapp.main import app
+import pytest
+
 from models.transcript_job import JobStatus, TranscriptJobProgress, TranscriptVideoItem
 from services.jobs.transcript_job_manager import transcript_job_manager
 

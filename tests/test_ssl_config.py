@@ -1,7 +1,6 @@
 """Tests for utils/ssl_config.py"""
 
 import ssl
-from unittest.mock import patch
 
 import certifi
 
@@ -63,8 +62,10 @@ class TestPatchHttplib2:
         http.close()
 
     def test_patched_init_respects_explicit_ca(self):
+        import os
+        import tempfile
+
         import httplib2
-        import tempfile, os
 
         patch_httplib2_ca_certs()
         with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as f:

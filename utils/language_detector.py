@@ -9,7 +9,8 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 try:
-    from langdetect import detect as langdetect_detect, DetectorFactory, LangDetectException
+    from langdetect import DetectorFactory, LangDetectException
+    from langdetect import detect as langdetect_detect
     DetectorFactory.seed = 42
     _HANG_LANGDETECT = True
 except ImportError:

@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 logger = logging.getLogger(__name__)
 

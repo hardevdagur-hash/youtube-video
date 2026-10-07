@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
 
@@ -143,7 +143,7 @@ class User:
 
     def __post_init__(self) -> None:
         if not self.created_at:
-            self.created_at = datetime.now(timezone.utc).isoformat()
+            self.created_at = datetime.now(UTC).isoformat()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -175,12 +175,12 @@ class Session:
 
     def __post_init__(self) -> None:
         if not self.created_at:
-            self.created_at = datetime.now(timezone.utc).isoformat()
+            self.created_at = datetime.now(UTC).isoformat()
 
     def is_expired(self) -> bool:
         if not self.expires_at:
             return False
-        return datetime.fromisoformat(self.expires_at) < datetime.now(timezone.utc)
+        return datetime.fromisoformat(self.expires_at) < datetime.now(UTC)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -213,12 +213,12 @@ class APIKey:
 
     def __post_init__(self) -> None:
         if not self.created_at:
-            self.created_at = datetime.now(timezone.utc).isoformat()
+            self.created_at = datetime.now(UTC).isoformat()
 
     def is_expired(self) -> bool:
         if not self.expires_at:
             return False
-        return datetime.fromisoformat(self.expires_at) < datetime.now(timezone.utc)
+        return datetime.fromisoformat(self.expires_at) < datetime.now(UTC)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -252,7 +252,7 @@ class SecurityEvent:
 
     def __post_init__(self) -> None:
         if not self.timestamp:
-            self.timestamp = datetime.now(timezone.utc).isoformat()
+            self.timestamp = datetime.now(UTC).isoformat()
 
     def to_dict(self) -> dict[str, Any]:
         return {

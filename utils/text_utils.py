@@ -1,8 +1,6 @@
 """Shared text utilities for the processing pipeline."""
 
 import re
-from typing import Sequence
-
 
 _REPEATED_WORDS = re.compile(r"\b(\w+)\s+\1\b", re.IGNORECASE)
 _REPEATED_LINES = re.compile(r"^(.+)\n\1$", re.MULTILINE)

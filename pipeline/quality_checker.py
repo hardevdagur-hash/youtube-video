@@ -1,8 +1,9 @@
 """Quality checker — validates processed transcript quality."""
 import re
 from typing import Any
+
+from models.processing_result import ProcessingFlags, ProcessingStepName
 from pipeline.base_processor import BaseProcessor
-from models.processing_result import ProcessingStepName, ProcessingFlags
 
 
 class QualityChecker(BaseProcessor):

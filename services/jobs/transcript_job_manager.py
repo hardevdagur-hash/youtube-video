@@ -16,14 +16,14 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Coroutine
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from config.settings import settings
-from models.transcript_job import JobStatus, TranscriptJobProgress, TranscriptVideoItem
-from services.duration_filter import evaluate_duration, parse_iso_duration
 from infrastructure.request_context import job_id_var
+from models.transcript_job import JobStatus, TranscriptJobProgress, TranscriptVideoItem
 from services.csv_safety import safe_csv_row
+from services.duration_filter import evaluate_duration, parse_iso_duration
 from services.public_errors import public_message
 from services.transcript_limiter import transcript_limiter
 
@@ -42,7 +42,7 @@ def _job_duration_seconds(job: TranscriptJobProgress) -> float | None:
         started = datetime.fromisoformat(job.created_at.replace("Z", "+00:00"))
     except (TypeError, ValueError):
         return None
-    return round((datetime.now(timezone.utc) - started).total_seconds(), 1)
+    return round((datetime.now(UTC) - started).total_seconds(), 1)
 
 
 def _log_job_outcome(job: TranscriptJobProgress) -> None:
@@ -73,14 +73,14 @@ def parse_date_boundary(date_str: str | None, is_end_of_day: bool = False) -> da
             dt = datetime.strptime(s, "%Y-%m-%d")
             if is_end_of_day:
                 dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
-            return dt.replace(tzinfo=timezone.utc)
+            return dt.replace(tzinfo=UTC)
         except Exception:
             pass
     try:
         clean_s = s.replace("Z", "+00:00")
         dt = datetime.fromisoformat(clean_s)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         return dt
     except Exception:
         logger.warning("Could not parse date boundary '%s'", date_str)
@@ -95,7 +95,7 @@ def parse_published_at(pub_str: str | None) -> datetime | None:
         clean_s = pub_str.strip().replace("Z", "+00:00")
         dt = datetime.fromisoformat(clean_s)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         return dt
     except Exception:
         return None
@@ -178,7 +178,7 @@ class TranscriptJobManager:
 
         Safe to call from a worker thread: it only touches files. Returns the removed ids.
         """
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         cutoff = now - timedelta(days=settings.job_retention_days)
         removed: list[str] = []
         for file_path in self._jobs_dir.glob("*.json"):
@@ -186,12 +186,12 @@ class TranscriptJobManager:
             if self._job_path(job_id) is None or job_id in self._jobs or job_id in self._tasks:
                 continue
             try:
-                if datetime.fromtimestamp(file_path.stat().st_mtime, timezone.utc) >= cutoff:
+                if datetime.fromtimestamp(file_path.stat().st_mtime, UTC) >= cutoff:
                     continue  # cheap pre-filter: recently written
                 job = TranscriptJobProgress(**json.loads(file_path.read_text(encoding="utf-8")))
                 updated = datetime.fromisoformat(job.updated_at.replace("Z", "+00:00"))
                 if updated.tzinfo is None:
-                    updated = updated.replace(tzinfo=timezone.utc)
+                    updated = updated.replace(tzinfo=UTC)
                 if job.status in RUNNING_STATUSES or updated >= cutoff:
                     continue
                 file_path.unlink()
@@ -202,7 +202,7 @@ class TranscriptJobManager:
                 logger.warning("Could not evaluate job checkpoint %s for expiry: %s", file_path.name, exc)
         for stale_tmp in self._jobs_dir.glob("*.tmp"):
             try:
-                if datetime.fromtimestamp(stale_tmp.stat().st_mtime, timezone.utc) < now - timedelta(hours=1):
+                if datetime.fromtimestamp(stale_tmp.stat().st_mtime, UTC) < now - timedelta(hours=1):
                     stale_tmp.unlink()
             except OSError:
                 continue
@@ -276,7 +276,7 @@ class TranscriptJobManager:
                 logger.error("Refusing to checkpoint job with invalid id %r", str(job.job_id)[:32])
                 return
             job.checkpoint_file = target.name
-            job.updated_at = datetime.now(timezone.utc).isoformat()
+            job.updated_at = datetime.now(UTC).isoformat()
             temp.write_text(job.model_dump_json(indent=2), encoding="utf-8")
             temp.replace(target)
         except Exception as exc:
@@ -363,7 +363,7 @@ class TranscriptJobManager:
                 task.cancel()
             if job:
                 job.status = JobStatus.CANCELLED
-                job.updated_at = datetime.now(timezone.utc).isoformat()
+                job.updated_at = datetime.now(UTC).isoformat()
                 self._save_checkpoint(job)
                 _log_job_outcome(job)
                 return True
@@ -477,7 +477,7 @@ class TranscriptJobManager:
                 logger.info("Job %s has no pending or rate-limited items to resume.", job_id)
                 if job.status not in (JobStatus.COMPLETED, JobStatus.CANCELLED):
                     job.status = JobStatus.COMPLETED
-                    job.completed_at = datetime.now(timezone.utc).isoformat()
+                    job.completed_at = datetime.now(UTC).isoformat()
                     self._save_checkpoint(job)
                 return job
 
@@ -492,7 +492,7 @@ class TranscriptJobManager:
 
             job.status = JobStatus.RUNNING
             job.error = None
-            job.updated_at = datetime.now(timezone.utc).isoformat()
+            job.updated_at = datetime.now(UTC).isoformat()
             self._save_checkpoint(job)
 
             self._launch(job, self._run_job(
@@ -522,7 +522,7 @@ class TranscriptJobManager:
         from api.video_service import VideoService
 
         progress.status = JobStatus.RUNNING
-        progress.updated_at = datetime.now(timezone.utc).isoformat()
+        progress.updated_at = datetime.now(UTC).isoformat()
         self._save_checkpoint(progress)
 
         try:
@@ -535,7 +535,7 @@ class TranscriptJobManager:
 
             progress.channel_id = channel_id
             progress.channel_title = channel_title
-            progress.updated_at = datetime.now(timezone.utc).isoformat()
+            progress.updated_at = datetime.now(UTC).isoformat()
 
             playlist_id = await _to_thread(video_svc.get_uploads_playlist_id, channel_id)
 
@@ -593,7 +593,7 @@ class TranscriptJobManager:
                     break
 
             progress.total_discovered = len(all_video_ids)
-            progress.updated_at = datetime.now(timezone.utc).isoformat()
+            progress.updated_at = datetime.now(UTC).isoformat()
 
             eligible_items: list[TranscriptVideoItem] = []
             skipped_count = 0
@@ -645,7 +645,7 @@ class TranscriptJobManager:
             progress.skipped_videos = skipped_count
             progress.remaining = len(eligible_items)
             progress.videos = eligible_items
-            progress.updated_at = datetime.now(timezone.utc).isoformat()
+            progress.updated_at = datetime.now(UTC).isoformat()
             self._save_checkpoint(progress)
 
             logger.info(
@@ -662,14 +662,14 @@ class TranscriptJobManager:
 
         except asyncio.CancelledError:
             progress.status = JobStatus.CANCELLED
-            progress.updated_at = datetime.now(timezone.utc).isoformat()
+            progress.updated_at = datetime.now(UTC).isoformat()
             self._save_checkpoint(progress)
         except Exception as exc:
             logger.exception("Job %s encountered error during discovery: %s", progress.job_id, exc)
             progress.status = JobStatus.FAILED
             # Client-visible; the exception detail stays in the server log.
             progress.error = "Channel discovery failed. Check the channel handle and try again."
-            progress.updated_at = datetime.now(timezone.utc).isoformat()
+            progress.updated_at = datetime.now(UTC).isoformat()
             self._save_checkpoint(progress)
             _log_job_outcome(progress)
 
@@ -695,7 +695,7 @@ class TranscriptJobManager:
             if v.status == "failed"
             and v.error_code not in ("NO_CAPTIONS", "CAPTIONS_DISABLED", "RATE_LIMITED")
         )
-        job.updated_at = datetime.now(timezone.utc).isoformat()
+        job.updated_at = datetime.now(UTC).isoformat()
 
     async def _apply_output_language(self, job: TranscriptJobProgress, item: TranscriptVideoItem) -> None:
         """Transform acquired transcript to Simple English or requested language with graceful fallback."""
@@ -747,7 +747,7 @@ class TranscriptJobManager:
 
         transcript_svc = TranscriptService()
         job.status = JobStatus.RUNNING
-        job.updated_at = datetime.now(timezone.utc).isoformat()
+        job.updated_at = datetime.now(UTC).isoformat()
         self._save_checkpoint(job)
 
         consecutive_rate_limits = 0
@@ -761,7 +761,7 @@ class TranscriptJobManager:
                 continue
 
             item.status = "processing"
-            item.last_attempt_at = datetime.now(timezone.utc).isoformat()
+            item.last_attempt_at = datetime.now(UTC).isoformat()
             self._recalculate_counters(job)
 
             # Process with retries under rate limit backoff
@@ -808,7 +808,7 @@ class TranscriptJobManager:
                         item.method = "caption"
                         item.error_code = None
                         item.error_message = None
-                        item.completed_at = datetime.now(timezone.utc).isoformat()
+                        item.completed_at = datetime.now(UTC).isoformat()
                         consecutive_rate_limits = 0
                         acquired_success = True
                         await self._apply_output_language(job, item)
@@ -880,7 +880,7 @@ class TranscriptJobManager:
                                 item.source_language_code = str(getattr(whisper_res, "source_language_code", None) or "")
                                 item.source = "whisper"
                                 item.method = "speech_to_text"
-                                item.completed_at = datetime.now(timezone.utc).isoformat()
+                                item.completed_at = datetime.now(UTC).isoformat()
                                 acquired_success = True
                                 await self._apply_output_language(job, item)
                                 break
@@ -903,7 +903,7 @@ class TranscriptJobManager:
                         item.error_code = error_code
                         item.error_message = error_msg
                         item.retryable = False
-                    item.completed_at = datetime.now(timezone.utc).isoformat()
+                    item.completed_at = datetime.now(UTC).isoformat()
                     break
 
                 except Exception as exc:
@@ -911,7 +911,7 @@ class TranscriptJobManager:
                     item.status = "failed"
                     item.error_code = "UNEXPECTED_ERROR"
                     item.error_message = public_message("UNEXPECTED_ERROR")
-                    item.completed_at = datetime.now(timezone.utc).isoformat()
+                    item.completed_at = datetime.now(UTC).isoformat()
                     break
 
             if item.status == "processing":
@@ -922,7 +922,7 @@ class TranscriptJobManager:
 
         if job.status not in (JobStatus.CANCELLED, JobStatus.PAUSED):
             job.status = JobStatus.COMPLETED
-            job.completed_at = datetime.now(timezone.utc).isoformat()
+            job.completed_at = datetime.now(UTC).isoformat()
             job.cooldown_seconds_remaining = 0.0
             self._recalculate_counters(job)
             self._save_checkpoint(job)

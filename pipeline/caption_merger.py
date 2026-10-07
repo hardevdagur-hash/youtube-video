@@ -1,8 +1,8 @@
 """Caption merging processor — merges fragmented captions into natural sentences."""
-import re
 from typing import Any
-from pipeline.base_processor import BaseProcessor
+
 from models.processing_result import ProcessingStepName
+from pipeline.base_processor import BaseProcessor
 
 
 class CaptionMerger(BaseProcessor):

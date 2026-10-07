@@ -10,9 +10,8 @@ Tracks production KPIs:
 """
 
 import threading
-import time
-from dataclasses import dataclass, field
-from typing import Any, Dict
+from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -86,7 +85,7 @@ class TranscriptMetricsTracker:
             if cache_hit:
                 self._metrics.translation_cache_hits += 1
 
-    def get_snapshot(self) -> Dict[str, Any]:
+    def get_snapshot(self) -> dict[str, Any]:
         with self._lock:
             m = self._metrics
             total_reqs = m.total_requests

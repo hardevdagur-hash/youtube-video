@@ -3,9 +3,8 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from fastapi.testclient import TestClient
 
-from webapp.main import UnifiedTranscriptRequest, app
+from webapp.main import UnifiedTranscriptRequest
 
 
 @pytest.fixture

@@ -21,7 +21,6 @@ Smart transcript selection strategy:
 """
 
 import logging
-import ssl
 import time
 import uuid
 from typing import Any
@@ -38,8 +37,8 @@ logger = logging.getLogger(__name__)
 try:
     from youtube_transcript_api import YouTubeTranscriptApi
     from youtube_transcript_api._errors import (
-        TranscriptsDisabled,
         NoTranscriptFound,
+        TranscriptsDisabled,
         VideoUnavailable,
     )
 
@@ -194,7 +193,7 @@ class LoggingSession(requests.Session):
                 request_id, method.upper(), url, elapsed, exc,
             )
             raise
-        except Exception as exc:
+        except Exception:
             elapsed = round(time.time() - start, 3)
             logger.exception(
                 "[%s] REQUEST FAILED %s %s  elapsed=%.3fs",

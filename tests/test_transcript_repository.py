@@ -1,10 +1,9 @@
 """Unit tests for TranscriptRepository."""
 
-from pathlib import Path
 
 import pytest
 
-from models.transcript import TranscriptResult, TranscriptSource, TranscriptProviderName
+from models.transcript import TranscriptProviderName, TranscriptResult, TranscriptSource
 from repositories.transcript_repository import TranscriptRepository
 from utils.cache import TTLCache
 

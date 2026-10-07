@@ -1,6 +1,7 @@
 """Pydantic models for transcript processing pipeline output."""
 
 from enum import Enum
+
 from pydantic import BaseModel, Field
 
 

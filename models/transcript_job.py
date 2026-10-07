@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
-from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -73,8 +73,8 @@ class TranscriptJobProgress(BaseModel):
     output_language: str = "en"
     owner: str | None = None  # authenticated principal that created the job
     max_videos: int = 0  # discovery cap requested at creation (kept so discovery can be resumed)
-    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
+    updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
     completed_at: str | None = None
     error: str | None = None
     videos: list[TranscriptVideoItem] = Field(default_factory=list)

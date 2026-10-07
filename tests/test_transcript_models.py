@@ -1,12 +1,12 @@
 """Unit tests for transcript Pydantic models."""
 
 from models.transcript import (
-    TranscriptSegment,
-    TranscriptResult,
-    TranscriptSource,
-    TranscriptProviderName,
-    WhisperProcessingInfo,
     PipelineStep,
+    TranscriptProviderName,
+    TranscriptResult,
+    TranscriptSegment,
+    TranscriptSource,
+    WhisperProcessingInfo,
 )
 
 

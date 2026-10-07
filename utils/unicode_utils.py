@@ -3,7 +3,6 @@
 import re
 import unicodedata
 
-
 _INVISIBLE_CHARS = re.compile(
     "[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f"
     "\u0080-\u009f"
