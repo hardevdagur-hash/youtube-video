@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [v3.0.0] - 2026-10-07
+
+### Transcript-only, single-instance production release
+
+- **Scope**: the transcript module is the only product. Removed the channel metadata
+  export (MVP 1) API and UI, legacy transcript routes, the unused observability /
+  reliability / security frameworks, and their dependencies (pandas, redis,
+  prometheus-client, Celery/Postgres stack, OpenTelemetry).
+- **Security**: client-safe error codes everywhere, strict input validation, active-job
+  and synchronous-run caps, path containment for all stored files, CSV formula-injection
+  protection, PyJWT-only sessions, Groq misconfiguration no longer signs users out.
+- **Architecture**: validated settings with `DATA_DIR`; jobs survive crashes/restarts
+  (recovered as paused), finished jobs leave memory, retention cleanup, bounded caches;
+  channel jobs use hosted Groq Whisper (the old local fallback never worked in
+  production); chunked translation that rejects truncated output.
+- **Deployment**: one Dockerfile (SPA + API, one worker), app + nginx compose stack with
+  TLS, deploy with health gate and automatic rollback, verified backup/restore, CI that
+  runs the real stack. Pinned dependencies (`requirements.lock`); `anyascii` was missing.
+- **Observability**: request/job/user ids on every log line, JSON logs, access log, job
+  outcome lines.
+- **Fixes**: resuming rate-limited jobs, discovery restarts on resume, single-video cache
+  isolation for Original Spoken, stale CSV export language in the UI.
+- **Breaking**: `/api/export*`, `/api/metrics`, `/api/quota`, `/api/cache/stats`,
+  `/api/video-metadata/*`, `/api/transcriptv2/*`, `/api/transcript/{id}[/…]` and
+  `/api/process-transcript` are gone; job `caption_concurrency`/`whisper_concurrency`
+  are ignored; default limits are 100 videos per job and 25 per synchronous request.
+
+---
+
 ## [v2.1.0] - 2026-09-21
 
 ### Architectural Refactor: Complete Removal of MVP #3 (Video URL → AI Blog)

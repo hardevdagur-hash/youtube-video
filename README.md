@@ -1,365 +1,185 @@
-# MATRIX YouTube Platform — Enterprise YouTube Intelligence, Speech-to-Text & Vernacular Normalization Engine
+# YouTube Transcript Service
 
-[![Tests Passing](https://img.shields.io/badge/Unit%20Tests-1081%20Passed-emerald.svg)](tests/)
-[![Python Version](https://img.shields.io/badge/Python-3.11%20%7C%203.12-blue.svg)](pyproject.toml)
-[![Architecture](https://img.shields.io/badge/Architecture-Cloud--Native%20%2F%2012--Factor-violet.svg)](docs/ENTERPRISE_PLATFORM_GUIDE.md)
-[![Security Audited](https://img.shields.io/badge/Security-TruffleHog%20%2B%20Bandit%20%2B%20RBAC-green.svg)](security/)
-[![Observability](https://img.shields.io/badge/Observability-OpenTelemetry%20%2B%20Prometheus-orange.svg)](observability/)
-[![Docker](https://img.shields.io/badge/Docker-Multi--Stage%20Builds-blue.svg)](docker/)
+Get transcripts for a single YouTube video or a whole channel, in the language
+actually spoken or rewritten as Simple English / Simple Hindi, and export them to CSV.
 
-> **A production-ready, cloud-native platform that solves the "Video Dark Data" challenge. It ingests, analyzes, transcribes, normalizes, and transforms YouTube multimedia libraries into high-fidelity structured data and clean, normalized transcripts.**
+- **Single video**: paste a URL or video ID and get the transcript.
+- **Channel**: give a handle (`@channel`) and transcribe its eligible videos, either
+  synchronously (small batches) or as a resumable background job with progress,
+  cancel, resume and CSV download.
+- **Output modes**: `original` (Original Spoken: verbatim captions/speech in the
+  spoken language, never translated), `en` (Simple English), `hi` (Simple Hindi).
+- **Fallback**: videos without captions are transcribed from their audio with Groq
+  Whisper (`whisper-large-v3`).
 
----
+It is a deliberately small system: one FastAPI process with one worker behind nginx,
+with all state in one directory (`DATA_DIR`). No database, Redis or worker queue.
 
-## 1. Executive Summary & The Real Importance of This Tool
-
-### The Challenge: Video is the Web's Largest Reservoir of "Dark Data"
-More than 500 hours of video are uploaded to YouTube every minute, comprising the world's most valuable computer science lectures, technical tutorials, medical breakthroughs, financial analyses, and executive interviews. 
-
-However, **99% of this knowledge is trapped in unstructured video/audio formats**:
-1. **Unsearchable Knowledge**: Search engines, corporate knowledge bases, and LLMs cannot crawl or index concepts trapped inside video timelines.
-2. **Speech-to-Text Fragility**: Standard automated captions lack punctuation, have no paragraph structure, and suffer from severe phonetic mishearings. Transcripts are frequently disabled or missing entirely.
-3. **The Vernacular & Accent Barrier**: Millions of high-impact technical lectures (particularly across STEM, JEE, NEET, and software engineering) are delivered in **Hinglish (Hindi + English)** or regional dialects. Standard Western ASR models (Whisper, Google STT) butcher technical vernacular—transcribing *"JEE Advanced"* as *"j-advans"*, *"IIT Roorkee"* as *"i troorkee"*, and *"DSA"* as *"the essay"*.
-4. **API Quota Bottlenecks**: The official YouTube Data API v3 imposes an uncompromising daily quota of 10,000 units. A naive search loop exhausts the daily quota after querying just a handful of channels.
-5. **Operational Brittleness**: Most open-source scrapers and transcription tools are toy scripts that crash on long videos, private uploads, or network timeouts.
-
-### How the MATRIX Platform Solves It
-The **MATRIX YouTube Enterprise Platform** transforms unstructured YouTube multimedia into structured, verified, publication-grade digital intelligence:
-- **High-Throughput Metadata Scraping**: Queries channels using playlist manipulation (costing **1 quota unit per 50 videos**, achieving **99% quota savings** over standard search) with constant-memory streaming CSV exports.
-- **Phase 22 Transcript Reliability Engine**: A multi-tiered automatic fallback chain: **YouTube Manual Captions $\rightarrow$ YouTube Auto Captions $\rightarrow$ Direct Audio Extraction (`yt-dlp`) $\rightarrow$ Local GPU Whisper $\rightarrow$ Whisper Cloud API $\rightarrow$ AssemblyAI / Deepgram**. Zero failed extractions.
-- **Hinglish & Vernacular-to-English Normalization**: The world's first specialized educational converter that repairs phonetic ASR errors, strips live teaching stutters/repetitions, formats spoken numbers/ranges, and produces polished, readable English **without LLM hallucination or condensation**.
-- **8-Stage NLP Cleaning Pipeline**: Reconstructs paragraphs, restores punctuation and capitalization, strips conversational filler words (*"uh"*, *"um"*, *"you know"*), and computes readability scores.
-- **Enterprise-Grade Observability & Security**: Built-in OpenTelemetry distributed tracing, Prometheus metrics, 9 pre-provisioned Grafana dashboards, RBAC, and sliding-window rate limiting.
-- **Zero-Downtime Blue-Green Production**: Fully containerized Docker Compose stack with automated pre-deploy backups, health check probes, and automated rollbacks.
-
----
-
-## 2. Platform Value & ROI Matrix
-
-| Target Industry / User | Traditional Pain Point | The MATRIX Solution | Measurable Impact |
-| :--- | :--- | :--- | :--- |
-| **EdTech & Academic Institutes** | Video lectures in Hinglish/English sit idle; manual note-taking is slow and expensive. | Automatically transcribes audio, fixes phonetic ASR errors, normalizes Hinglish, and produces formatted study notes. | **95% reduction** in manual transcription costs; study notes generated in seconds. |
-| **Content Publishers & Media** | Video transcripts are fragmented, unformatted, and difficult to search or index. | Multi-tier reliability STT engine extracts full transcripts with automated punctuation and 8-stage NLP cleaning. | **Instant text cataloging** of entire multimedia libraries for search indexing. |
-| **Competitive Intelligence & R&D** | Manual monitoring of competitor channels, webinars, and product updates is slow and quota-prohibitive. | High-throughput metadata scraper discovers full channel catalogs, aggregates views/engagement, and extracts structured CSVs. | **Instant full-channel cataloging** with zero quota exhaustion (batch 50 queries). |
-| **AI / LLM Engineering Teams** | Raw video transcripts are too noisy and unpunctuated for LLM pre-training or RAG retrieval. | 8-stage NLP pipeline removes speech disfluencies, normalizes unicode, and reconstructs grammatical syntax. | **High-entropy, pristine RAG corpus** directly ingestible by vector databases. |
-
----
-
-## 3. High-Level Architecture
-
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                      PRESENTATION LAYER (React + Vite)                  │
-│       Tailwind CSS • Framer Motion • Dark/Light Modes • Lucide Icons   │
-│         /metadata (Scraper) • /transcript (STT Engine)                 │
-└───────────────────────────────────┬────────────────────────────────────┘
-                                    │ HTTP / REST / SSE / WebSockets
-                                    ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│                  API GATEWAY & ROUTING (FastAPI / ASGI)                │
-│    CORS Middleware • Sliding-Window Rate Limiter • Security Headers    │
-│    Input Validation Middleware • Trace Context & Correlation IDs       │
-└─────────────────┬───────────────────────────────────┬──────────────────┘
-                  │                                   │
-                  ▼                                   ▼
-┌─────────────────────────────────┐ ┌────────────────────────────────────┐
-│      CORE DOMAIN SERVICES       │ │     ASYNCHRONOUS EXPORT ENGINE     │
-│ • YouTubeMetadataService        │ │ • AsyncExportPipeline              │
-│ • ChannelResolver               │ │ • JobManager (In-Memory + Thread)  │
-│ • EnglishConverter (Hinglish)   │ │ • Streaming CSV Writer             │
-│ • 8-Stage NLP ProcessingPipeline│ │ • Channel Cache Layer              │
-└─────────────────┬───────────────┘ └─────────────────┬──────────────────┘
-                  │                                   │
-                  ▼                                   ▼
-┌────────────────────────────────────────────────────────────────────────┐
-│             PHASE 22 TRANSCRIPT RELIABILITY ENGINE (L1-L3)             │
-│  Provider Registry • Priority Manager • Circuit Breakers • RetryEngine │
-│  L1 Memory Cache ──▶ L2 Redis Cache ──▶ L3 PostgreSQL Cache            │
-│  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │ Fallback Chain:                                                  │  │
-│  │ 1. YouTube Manual Captions  ──▶ 2. YouTube Auto-Generated Captions│  │
-│  │ 3. yt-dlp Audio Stream      ──▶ 4. Whisper Local / GPU (CUDA)    │  │
-│  │ 5. Whisper Cloud API        ──▶ 6. AssemblyAI / Deepgram Provider│  │
-│  └──────────────────────────────────────────────────────────────────┘  │
-└─────────────────┬───────────────────────────────────┬──────────────────┘
-                  │                                   │
-                  ▼                                   ▼
-┌─────────────────────────────────┐ ┌────────────────────────────────────┐
-│    ENTERPRISE OBSERVABILITY     │ │    ENTERPRISE SECURITY & RBAC      │
-│ • OpenTelemetry Distributed Spans│ │ • JWT Service & API Key Manager    │
-│ • Prometheus System Metrics     │ │ • RBAC & Fine-Grained Permissions  │
-│ • Structured JSON Logging       │ │ • Input Validation & Sanitization  │
-│ • 9 Provisioned Grafana Panels  │ │ • Threat Detector & Audit Logger   │
-│ • Job & Export Metrics          │ │ • TLS 1.3 Termination & Security   │
-└─────────────────────────────────┘ └────────────────────────────────────┘
-```
-
-For full architectural blueprints, see [`docs/ENTERPRISE_PLATFORM_GUIDE.md`](docs/ENTERPRISE_PLATFORM_GUIDE.md).
-
----
-
-## 4. Core Subsystems & Technical Innovations
-
-### 4.1. High-Throughput Metadata Scraper & Quota Optimizer
-- **Search vs. Playlist Architecture**: Instead of calling the costly `search.list` API (100 units/call), the platform resolves the channel ID and queries the hidden Uploads Playlist (`UU...`) via `playlistItems.list` (**1 unit per 50 videos**).
-- **Parallel Batched Enrichment**: Groups video IDs into chunks of 50 for `videos.list(part="snippet,contentDetails,statistics")`, fetching view counts, like counts, and ISO 8601 durations in a single call.
-- **Streaming CSV Generation**: Uses Python's native CSV streaming engine to write directly to disk with constant memory consumption, enabling 100,000+ video exports.
-
-### 4.2. Multi-Provider Transcript Reliability Engine (`transcript_reliability/`)
-- **Automated Fallback Hierarchy**:
-  1. YouTube Manual Captions (highest accuracy, original punctuation).
-  2. YouTube Auto-Generated Captions.
-  3. Direct Audio Stream Extraction (`yt-dlp` .m4a format without external ffmpeg dependencies).
-  4. Local Whisper Speech-to-Text (CUDA GPU accelerated or multi-core CPU).
-  5. Cloud Whisper API.
-  6. External Speech APIs (AssemblyAI, Deepgram).
-- **Circuit Breakers & Exponential Backoff**: Stateful circuit breakers monitor each provider's error rates. Full-jitter exponential backoff prevents quota stampedes.
-- **Multi-Tier Caching**: L1 in-memory LRU cache, L2 Redis distributed cache, L3 PostgreSQL permanent persistence.
-
-### 4.3. Hinglish & Vernacular-to-English Conversion Engine (`services/english_converter.py`)
-- **Phonetic & ASR Repair**: Corrects accented speech mishearings (e.g. `"j-advans"` $\rightarrow$ `"JEE Advanced"`, `"iit roorkee"` $\rightarrow$ `"IIT Roorkee"`, `"dsa"` $\rightarrow$ `"DSA"`).
-- **Repetition & Stutter Removal**: Strips conversational lecturer repetitions (*"Physics par. Physics par dhyan do."* $\rightarrow$ *"Focus on Physics."*).
-- **Spoken Range Normalization**: Converts spoken strings like `"96 97 percentile"` or `"130 plus"` into standard academic formats (`"96–97 percentile"`, `"130+"`).
-- **Deterministic & Non-Summarizing**: Guarantees zero hallucination; retains every formula, technical step, and explanation.
-
-### 4.4. 8-Stage NLP Transcript Processing Pipeline (`pipeline/`)
-Sequences transcript segments through eight discrete processors:
-1. `TimestampProcessor`: Aligns timestamps, eliminates negative gaps, and fixes overlaps.
-2. `CaptionMerger`: Merges micro-segments into coherent sentences.
-3. `PunctuationProcessor`: Restores missing periods, commas, and question marks.
-4. `CapitalizationProcessor`: Enforces sentence capitalization and proper noun casing.
-5. `ParagraphProcessor`: Breaks continuous streams into readable paragraphs based on natural pause durations.
-6. `FillerProcessor`: Removes conversational filler words (*"uh"*, *"um"*, *"you know"*).
-7. `LanguageProcessor`: Detects language, confidence, and code-switching patterns.
-8. `QualityChecker`: Computes word entropy, repetition scores, and readability metrics.
-
-### 4.5. Enterprise Observability & Security (`observability/`, `security/`)
-- **OpenTelemetry & Prometheus**: End-to-end distributed tracing across all asynchronous jobs. Prometheus metrics exported at `/api/metrics` (`youtube_seo_` namespace).
-- **9 Provisioned Grafana Dashboards**: Operational monitoring for system throughput, worker queues, and cache efficiency.
-- **Defense-in-Depth Security**: JWT authentication, fine-grained RBAC, sliding-window rate limiting, input sanitization, and audit logging.
-
----
-
-## 5. Folder Structure & Modular Organization
+## Architecture
 
 ```text
-youtube-video-main/
-│
-├── .env.example               # Spec and template for required environment variables
-├── Dockerfile.api             # Multi-stage production build for FastAPI backend
-├── Dockerfile.frontend        # Multi-stage Node 20 + Nginx build for React UI
-├── Makefile                   # 17 developer workflow targets
-├── requirements.txt           # Production backend dependencies
-├── requirements-dev.txt       # Testing, linting, and formatting dependencies
-│
-├── api/                       # External YouTube API integration clients
-│   ├── youtube_client.py      # Authenticated YouTube Data API v3 client
-│   ├── channel_service.py     # Channel handle resolution & details
-│   └── video_service.py       # Batched video metadata & playlist retrieval
-│
-├── clients/                   # Specialized external clients (Whisper, YouTube)
-├── config/                    # Environment-driven configuration (settings.py)
-├── database/                  # Database session, migrations, and repositories
-│
-├── docker/                    # Container orchestration and monitoring
-│   ├── docker-compose.yml     # Production multi-service compose stack
-│   ├── docker-compose.dev.yml # Development hot-reload configuration
-│   ├── nginx/                 # Nginx reverse proxy with SSL & Brotli
-│   └── monitoring/            # Prometheus, Grafana, & OTel Collector configs
-│
-├── docs/                      # Architectural specs & engineering runbooks
-│   ├── ENTERPRISE_PLATFORM_GUIDE.md  # Master platform deep-dive
-│   └── background-processing/ # Background queue topology & architecture
-│
-├── export_engine/             # High-throughput asynchronous streaming export engine
-│   ├── async_pipeline.py      # Parallel batch fetching orchestrator
-│   └── job_manager.py         # Thread-safe export job lifecycle manager
-│
-├── frontend/                  # React 18 + Vite + TypeScript frontend
-│   └── src/
-│       ├── pages/             # Home, Metadata, Transcript, Docs, Errors
-│       ├── components/        # Reusable UI cards, tables, badges, modals
-│       └── services/          # Frontend API integration clients
-│
-├── infrastructure/            # Cache, rate limiter, retry, and monitoring primitives
-├── models/                    # Pydantic schemas (Metadata, Transcript)
-├── observability/             # OpenTelemetry, Prometheus metrics, and Grafana configs
-├── pipeline/                  # 8-stage NLP transcript processing pipeline
-├── providers/                 # Speech-to-text providers (Manual, Auto, Whisper)
-├── repositories/              # Persistence layer for transcripts and jobs
-├── scripts/                   # Deployment, rollback, backup, and health check scripts
-├── security/                  # JWT, RBAC, input validation, audit logging
-├── services/                  # Business logic (Hinglish converter, URL parser, discovery)
-│   ├── audio/                 # yt-dlp direct audio stream extraction
-│   └── english_converter.py   # Specialized Hinglish-to-English normalizer
-│
-├── tests/                     # 3,250+ automated tests across 20 test categories
-│   └── unit/                  # 1,081 passing unit tests
-└── webapp/                    # FastAPI application, routes, and middleware
-    └── main.py                # Core REST API gateway
+Internet ──► nginx (TLS, HTTP→HTTPS, security headers, per-IP flood limit)
+                │  only public entry point; app port is not published
+                ▼
+         FastAPI app — 1 container, 1 Uvicorn worker (webapp/main.py)
+         ├─ auth middleware: session cookie or X-API-Key, roles, per-user rate limits
+         ├─ React SPA (built into the image, served from frontend/dist)
+         ├─ single video ── services/transcription/service.py
+         │                    captions → (no captions) audio + Groq Whisper → clean → validate
+         ├─ channels/jobs ── services/jobs/transcript_job_manager.py
+         │                    YouTube Data API discovery → services/transcript_service.py
+         │                    (manual captions → auto captions → Groq Whisper) per video
+         ├─ translation ──── services/translation/service.py (Groq LLM, chunked, cached)
+         └─ CSV export ───── formula-injection-safe writer
+                ▼
+         DATA_DIR (Docker volume transcript_data → /app/data)
+           transcripts/      transcript + translation cache (JSON per video)
+           transcript_jobs/  job checkpoints (JSON per job)  ← the source of truth for jobs
+           tmp/audio/        short-lived audio downloads
 ```
 
----
+Background jobs are asyncio tasks inside the app process, checkpointed to disk after
+every video. That is why the service must run as **exactly one instance with one
+worker**: a second worker would not see the first one's running jobs. See
+[docs/TRANSCRIPT_MODULE.md](docs/TRANSCRIPT_MODULE.md) for the full pipeline.
 
-## 6. Installation & Quickstart
+| Path | What it is |
+| --- | --- |
+| `webapp/main.py` | FastAPI app: routes, middleware, error handling |
+| `security/web_auth.py` | Authentication, authorization, CSRF, rate limits, CORS |
+| `services/transcription/` | Single-video pipeline: captions → Groq Whisper → cleaning → validation |
+| `services/transcript_service.py`, `providers/`, `clients/` | Channel/job pipeline: manual → auto captions → Whisper |
+| `services/jobs/transcript_job_manager.py` | Background jobs: discovery, pacing, checkpoints, resume, retention |
+| `services/translation/` | Simple English / Simple Hindi via Groq |
+| `api/` | YouTube Data API (channel resolution, uploads playlist, video metadata) |
+| `config/settings.py` | All configuration (validated environment variables) |
+| `frontend/` | React + Vite SPA (`/transcript`) |
+| `Dockerfile`, `docker-compose.yml`, `docker/nginx/` | Production stack |
+| `scripts/` | deploy, backup, restore, rollback, TLS, credential setup |
 
-### Prerequisites
-- **Python 3.11+** or **Python 3.12+**
-- **Node.js 18+** & **npm** (for frontend development)
-- **YouTube Data API v3 Key** ([Google Cloud Console](https://console.cloud.google.com/))
+## API
 
-### 1. Environment Setup
-```bash
-# Clone the repository
-git clone https://github.com/your-org/youtube-video-main.git
-cd youtube-video-main
+All `/api/*` routes require authentication except `GET /api/health` and
+`POST /api/auth/login|logout`. Send a session cookie (browser) or `X-API-Key`.
 
-# Copy environment template
-cp .env.example .env
-```
+| Method & path | Purpose |
+| --- | --- |
+| `GET /api/health` | Health: 200 `ok` or 503 `unhealthy` (signed-in callers get details) |
+| `POST /api/auth/login` / `logout`, `GET /api/auth/me` | Session cookie auth; `me` also returns server limits |
+| `POST /api/transcript` | `{video_url, output_language: original\|en\|hi}` → transcript |
+| `GET /api/channel/{handle}/transcripts` | Synchronous channel run (≤ `MAX_VIDEOS_SYNC_EXPORT`) |
+| `POST /api/channel/{handle}/transcript-job` | Start a background job (≤ `MAX_VIDEOS_PER_JOB`) |
+| `GET /api/transcript/jobs/{id}` | Job status, progress and per-video results |
+| `POST /api/transcript/jobs/{id}/cancel` / `resume` | Cancel / resume a job |
+| `GET /api/transcript/jobs/{id}/download` | Job CSV |
+| `POST /api/transcript/export` | Synchronous CSV for a video or a small channel run |
+| `GET /api/validate-url` | Parse and validate a YouTube URL |
+| `GET /api/transcript/metrics`, `/api/transcript/limiter/status` | Admin only |
 
-Edit `.env` with your API credentials:
-```ini
-YOUTUBE_API_KEY=AIzaSy...your_actual_key...
-DATABASE_URL=sqlite:///./data/yt_platform.db
-REDIS_URL=redis://localhost:6379/0
-LOG_LEVEL=INFO
-```
+Errors are `{"success": false, "error_code", "message", "trace_id"}` with fixed,
+client-safe messages; the `trace_id` equals the `X-Request-ID` response header and
+appears in every server log line for that request.
 
-### 2. Launch Locally with One Command
+## Configuration
 
-#### Windows (PowerShell)
-```powershell
-.\start.ps1
-```
+Everything is an environment variable; [`.env.example`](.env.example) documents
+each one. The essentials:
 
-#### macOS / Linux
-```bash
-# 1. Create and activate virtual environment
-python3 -m venv venv
-source venv/bin/activate
+| Variable | Required | Notes |
+| --- | --- | --- |
+| `APP_ENV` | yes | `development` or `production` (production refuses unsafe config) |
+| `YOUTUBE_API_KEY` | yes | YouTube Data API v3 key (channel discovery, titles) |
+| `GROQ_API_KEY` | for STT / `en` / `hi` | Empty: only captioned videos and `original` mode work |
+| `JWT_SECRET_KEY` | production | ≥ 32 random chars; signs session cookies |
+| `AUTH_USERS` / `API_KEYS` | production (one of) | `user:role:scrypt-hash` / `name:role:sha256` |
+| `CORS_ORIGINS` | no | Only for cross-origin browser clients; never `*` |
+| `DATA_DIR` | no | Persistent data (`./data`; `/app/data` in Docker) |
+| `MAX_VIDEOS_PER_JOB`, `MAX_VIDEOS_SYNC_EXPORT`, `MAX_ACTIVE_JOBS[_PER_USER]` | no | Abuse/cost limits (100, 25, 4/2) |
+| `JOB_RETENTION_DAYS` | no | Finished jobs are deleted after this (30) |
+| `LOG_LEVEL`, `LOG_FORMAT` | no | `INFO`; `text` or `json` (the image uses `json`) |
 
-# 2. Install backend dependencies
-pip install -r requirements.txt
+Generate the security values with
+`python scripts/configure_env.py --app-env production --origin https://<your-domain>`
+(prompts for the admin password, writes hashes only, backs up the old `.env`).
 
-# 3. Start FastAPI backend
-uvicorn webapp.main:app --host 127.0.0.1 --port 8000 --reload &
+## Local development
 
-# 4. Install and start frontend
-cd frontend
-npm install
-npm run dev
-```
-
-Open your browser:
-- **Web App (Vite Dev Server)**: `http://localhost:5173`
-- **Web App (FastAPI Production SPA)**: `http://localhost:8000`
-- **Interactive Swagger UI**: `http://localhost:8000/docs`
-
----
-
-## 7. Production Docker Deployment
-
-Deploy the entire production ecosystem (FastAPI backend, Celery workers, Redis 7, PostgreSQL 16, Prometheus, Grafana, Nginx reverse proxy) in seconds:
+Requirements: Python 3.12, Node 20.
 
 ```bash
-# Build and start all services in detached mode
-docker compose -f docker/docker-compose.yml up -d --build
-
-# View container status and health
-docker compose -f docker/docker-compose.yml ps
+python -m venv .venv && .venv/Scripts/pip install -r requirements-dev.txt   # Windows
+npm --prefix frontend ci
+cp .env.example .env        # set YOUTUBE_API_KEY (and GROQ_API_KEY)
+python scripts/configure_env.py --app-env development --origin http://localhost:5173
+make dev-api                # API on http://127.0.0.1:8000 (auto-reload)
+make dev-web                # SPA on http://127.0.0.1:5173, proxies /api
 ```
 
-### Production Access Points
-- **Web UI & API Proxy**: `https://localhost` (or `http://localhost:80`)
-- **Swagger Documentation**: `http://localhost:8000/docs`
-- **Prometheus Metrics**: `http://localhost:9090`
-- **Grafana Dashboards**: `http://localhost:3000` (Default: `admin` / `admin`)
-- **Flower Celery Dashboard**: `http://localhost:5555`
+On Windows without `make`, `start.ps1` starts both.
 
----
+## Testing
 
-## 8. CLI Usage Guide
-
-The platform provides standalone CLI entry points for pipeline operations and scripting:
-
-### 1. Channel Lookup (Resolve Handle $\rightarrow$ Channel ID)
 ```bash
-python run_channel_lookup.py @GoogleDevelopers
-# Output: Channel ID: UC_x5XG1OV2P6uZZ5FSM9Ttw
+make check                                     # ruff (read-only) + pytest + frontend typecheck/tests/build
+pytest -o log_cli=false -q                     # backend: unit, security, reliability, integration
+RUN_LIVE_TESTS=1 pytest -m live tests/live     # real YouTube/Groq calls (uses .env keys; costs quota)
+SMOKE_TEST_URL=https://host SMOKE_TEST_INSECURE=1 pytest -m smoke tests/smoke   # against a deployment
+API_KEY=<raw key named "ci"> tests/deployment/stack_test.sh                    # restart/backup/restore on a stack
 ```
 
-### 2. Video Discovery (Channel ID $\rightarrow$ Full Video Listing)
+Tests never touch real data or credentials: they run with a temporary `DATA_DIR` and
+blank API keys. `ruff check .` never modifies files; fixing is an explicit
+`make lint-fix`. CI (`.github/workflows/ci.yml`) runs all of the above and additionally
+builds the image and runs the real compose stack (nginx + TLS + volume).
+
+## Production deployment
+
+Single Linux host with Docker Engine and the compose plugin; DNS for your domain
+pointing at it; ports 80 and 443 open. Full runbook: [docs/OPERATIONS.md](docs/OPERATIONS.md).
+
 ```bash
-python run_video_discovery.py UC_x5XG1OV2P6uZZ5FSM9Ttw
-# Output: Discovered 142 videos in 3 API requests
+git clone <repo> transcripts && cd transcripts
+cp .env.example .env && chmod 600 .env       # fill in keys (see Configuration)
+python3 scripts/configure_env.py --app-env production --origin https://transcripts.example.com
+scripts/init-tls.sh self-signed transcripts.example.com   # bootstrap certificate
+scripts/deploy.sh                                          # build, start, health-gate, auto-rollback
+scripts/init-tls.sh letsencrypt transcripts.example.com you@example.com
+curl -fsS https://transcripts.example.com/api/health
 ```
 
-### 3. Fetch Batched Video Metadata
-```bash
-python run_video_metadata.py dQw4w9WgXcQ 5NV6Rdv1a3I
-```
+- **Persistence**: everything lives in the `transcript_data` volume; restarts and
+  redeploys keep all jobs and transcripts. Jobs that were running when the app stopped
+  come back as `paused`; resume them from the UI or API.
+- **Backup / restore**: `scripts/backup.sh` (verified, checksummed tarball under
+  `./backups`, keeps 14), `scripts/restore.sh <archive>`. `.env` is not included:
+  keep secrets in your password manager / secret store.
+- **Rollback**: `scripts/rollback.sh` starts the previously deployed image
+  (`deploy.sh` does this automatically when a new image fails its health checks).
+- **Logs**: `docker compose logs -f app` (JSON, one line per event, with
+  `request_id`, `job_id` and `user`).
 
-### 4. Extract Clean Transcript with Automatic Fallback
-```bash
-python run_transcript.py dQw4w9WgXcQ --format clean
-```
+## Security
 
-### 5. Run Full End-to-End Pipeline
-```bash
-python run_pipeline.py @physicsgalaxyworld --max-videos 100 --export-csv
-```
+Deny-by-default authentication on `/api/*`; per-job ownership (users see only their
+own jobs, admins see all; another user's job is indistinguishable from a missing one); CSRF origin checks for cookie
+sessions; per-user and per-IP rate limits; job and synchronous-run caps; strict
+validation of every identifier and path; formula-injection-safe CSV; generic client
+errors with server-side detail; secrets redacted from all logs; non-root container
+without published app port. Details and key-rotation steps: [SECURITY.md](SECURITY.md).
 
----
+## Known limitations
 
-## 9. Testing & Quality Assurance
-
-The platform is backed by comprehensive testing infrastructure:
-- **1,081 Unit Tests Passing** across 16 core test modules.
-- **Production Readiness Score**: **92 / 100** (audited in [`PRODUCTION_READINESS_REPORT.md`](PRODUCTION_READINESS_REPORT.md)).
-- **Zero TypeScript / React Build Errors**.
-
-Run the full unit test suite:
-```bash
-pytest tests/unit/ -v
-```
-
-Run test suite with coverage report:
-```bash
-pytest tests/unit/ --cov=. --cov-report=html
-```
-
----
-
-## 10. Key API Endpoints
-
-| Endpoint | Method | Description |
-| :--- | :--- | :--- |
-| `/api/health` | `GET` | Health check (database, redis, active jobs) |
-| `/api/validate-url` | `GET` | Validates YouTube video or channel URL |
-| `/api/export` | `POST` | Dispatches background channel metadata export |
-| `/api/export/{job_id}/progress` | `GET` | Polls real-time progress for an export job |
-| `/api/export/{job_id}/download` | `GET` | Streams completed CSV file download |
-| `/api/transcript/{video_id}` | `GET` | Full transcript with segments, text, and fallback |
-| `/api/transcriptv2/{video_id}` | `GET` | Lightweight transcript (title, duration, text) |
-| `/api/transcript/export` | `POST` | Exports transcripts as a formatted CSV |
-| `/api/process-transcript` | `POST` | Executes 8-stage NLP cleaning on transcript text |
-| `/api/video-metadata/{video_id}` | `GET` | Retrieves enriched video metadata and statistics |
-| `/api/metrics` | `GET` | Prometheus telemetry & observability metrics |
-| `/api/quota` | `GET` | Live YouTube Data API v3 daily quota tracker |
-
----
-
-## 11. Security & Compliance
-
-- **Secret Management**: API keys and database credentials are injected exclusively via environment variables; never checked into version control.
-- **Security Headers**: HSTS, Content-Security-Policy (CSP), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`.
-- **Sliding-Window Rate Limiting**: Redis-backed rate limiting protects against quota abuse and denial-of-service.
-- **Input Sanitization**: All user inputs, URLs, and channel identifiers are strictly validated against injection attacks.
-- **Audit Trails**: Security audit logger captures 18 distinct event categories with correlation IDs.
-
----
-
-## 12. License & Credits
-
-Developed with enterprise engineering standards, following clean architecture, 12-factor application design, and production cloud-native best practices.
+- **One instance only.** Jobs, rate limits and caches live in one process. Scaling out
+  would need a shared job store and queue; that is intentionally out of scope.
+- **Sequential channel jobs.** Videos are processed one at a time with global pacing
+  (`TRANSCRIPT_REQUEST_INTERVAL`) to stay under YouTube's caption rate limits; large
+  channels take time and can pause on persistent rate limiting (resume later).
+- **Channel eligibility**: only 3–30 minute, non-live videos are transcribed.
+- **YouTube may block caption fetching** from some server IPs (cloud ranges); videos
+  then fall back to speech-to-text if `GROQ_API_KEY` is set.
+- **Two transcript pipelines.** Single videos and channel jobs use different (but
+  equivalent-mode) pipelines and separate caches; output text can differ slightly in
+  cleaning.
+- **Speech-to-text limits**: audio over Groq's 25 MB upload limit is not downloaded, so
+  speech-to-text fails for videos longer than roughly 45–60 minutes.
+- The `/api/transcript/metrics` counters are in-memory and reset on restart.

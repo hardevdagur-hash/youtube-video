@@ -1,25 +1,27 @@
 # Security Policy
 
-## Supported Versions
+## Reporting a vulnerability
 
-Use this section to tell people about which versions of your project are
-currently being supported with security updates.
+Report suspected vulnerabilities privately to the repository owner (do not open a
+public issue). Include the affected endpoint or file, reproduction steps and impact.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 5.1.x   | :white_check_mark: |
-| 5.0.x   | :x:                |
-| 4.0.x   | :white_check_mark: |
-| < 4.0   | :x:                |
+## Controls at a glance
 
-## Reporting a Vulnerability
-
-Use this section to tell people how to report a vulnerability.
-
-Tell them where to go, how often they can expect to get an update on a
-reported vulnerability, what to expect if the vulnerability is accepted or
-declined, etc.
-
+| Control | Where | Behaviour |
+| --- | --- | --- |
+| Authentication | `security/web_auth.py` (`AuthMiddleware`) | Deny by default on `/api/*`; session cookie or `X-API-Key` |
+| Authorization | `webapp/main.py` (`can_access_owned`) | Jobs belong to their creator; admins see all; others get "not found" |
+| CSRF | `WebAuthenticator.origin_allowed` | Cookie-authenticated unsafe methods need a trusted/same-host `Origin` |
+| CORS | `cors_options`, `CORS_ORIGINS` | Explicit origins only; `*` refused in production; same-origin needs none |
+| Rate limits | `AuthMiddleware`, nginx `limit_req` | Per user (`API_RATE_LIMIT_PER_MINUTE`, `COSTLY_RATE_LIMIT_PER_MINUTE`), per IP for login and at nginx |
+| Resource caps | `config/settings.py` | `MAX_VIDEOS_PER_JOB`, `MAX_VIDEOS_SYNC_EXPORT`, `MAX_ACTIVE_JOBS[_PER_USER]`, `MAX_CONCURRENT_SYNC_CHANNEL_RUNS` |
+| Input validation | Pydantic models / path patterns | Strict video/job/handle ids, output modes, ISO dates, body ≤ 1 MB (nginx) |
+| Path safety | `TranscriptRepository._file_for`, `TranscriptJobManager._job_path` | Files only from validated ids, resolved path must stay inside `DATA_DIR` |
+| Error hygiene | `services/public_errors.py`, global handler | Fixed client messages + `trace_id`; details only in server logs |
+| CSV injection | `services/csv_safety.py` | Cells starting with `= + - @` / tab / CR are prefixed with `'` |
+| Secret redaction | `infrastructure/log_redaction.py` | API keys, tokens, cookies, passwords removed from every log line |
+| Transport | `docker/nginx/nginx.conf` | TLS 1.2/1.3, HSTS, CSP, HTTP→HTTPS |
+| Container | `Dockerfile`, `docker-compose.yml` | Non-root, `cap_drop: ALL`, `no-new-privileges`, app port not published |
 ## Authentication model
 
 Every `/api/*` request is denied unless it carries valid credentials. The only
@@ -30,8 +32,8 @@ exceptions are `GET /api/health` (coarse status only) and `POST /api/auth/login|
 | Browser (SPA) | `session` cookie (HttpOnly, SameSite=Strict, Secure in production), issued by `POST /api/auth/login` | `AUTH_USERS=username:role:scrypt-hash` |
 | Scripts / services | `X-API-Key: ysk_...` header | `API_KEYS=name:role:sha256` |
 
-- Roles: `admin` (operational endpoints such as `/api/metrics`, `/api/quota`,
-  `/api/cache/stats`, and every user's jobs) and `user` (only the jobs they created).
+- Roles: `admin` (operational endpoints `/api/transcript/metrics` and
+  `/api/transcript/limiter/status`, and every user's jobs) and `user` (only the jobs they created).
 - Only hashes are stored in configuration. To configure a production `.env` in one step
   (admin password prompt, generated `JWT_SECRET_KEY`, optional admin API key, explicit
   `CORS_ORIGINS`, `APP_ENV=production`, backup + validation against the startup checks):
@@ -60,8 +62,8 @@ the loopback interface. When a real domain exists, re-run
 mode); it replaces `CORS_ORIGINS` and refuses `*` or `http://` origins.
 - Rate limits are per principal (`API_RATE_LIMIT_PER_MINUTE`, `COSTLY_RATE_LIMIT_PER_MINUTE`)
   and per IP for login. Repeated failed logins lock that username for 15 minutes.
-  The limits are held in process memory: with several workers or replicas, each one
-  enforces its own budget.
+  The limits are held in process memory, which is correct for the supported single-instance,
+  single-worker deployment (do not scale out without moving them to a shared store).
 
 ## Rotating third-party API keys
 
