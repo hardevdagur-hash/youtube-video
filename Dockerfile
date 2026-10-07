@@ -64,6 +64,7 @@ RUN mkdir -p /app/data && chown app:app /app/data
 ENV APP_ENV=production \
     DATA_DIR=/app/data \
     LOG_TO_FILE=false \
+    LOG_FORMAT=json \
     HOME=/app \
     XDG_CACHE_HOME=/tmp/.cache
 

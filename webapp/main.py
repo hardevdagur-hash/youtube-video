@@ -32,7 +32,6 @@ import io
 import logging
 import re
 import time
-import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -45,6 +44,7 @@ from pydantic import BaseModel, Field
 
 from config.settings import is_youtube_api_key_valid, settings
 from infrastructure.logging import setup_logging
+from infrastructure.request_context import current_request_id, new_request_id, request_id_var, user_var
 from infrastructure.validation import RequestValidationMiddleware
 from models.api_response import error_response, success_response
 from services.csv_safety import safe_csv_row
@@ -68,10 +68,8 @@ logger = logging.getLogger("webapp")
 
 
 def _to_thread(func, *args, **kwargs):
-    """Run a sync function in a thread pool to avoid blocking the event loop."""
-    import functools
-    loop = asyncio.get_running_loop()
-    return loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
+    """Run blocking work in the default thread pool, keeping the logging context (request id)."""
+    return asyncio.to_thread(func, *args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -139,27 +137,53 @@ for _mount, _sub in (("/assets", "assets"), ("/static", "static")):
         app.mount(_mount, StaticFiles(directory=str(_dir)), name=f"frontend-{_sub}")
 
 
+_access_logger = logging.getLogger("webapp.access")
+# Probes and static files are logged at DEBUG so INFO logs stay readable.
+_QUIET_PATHS = ("/api/health", "/assets/", "/static/")
+
+
 @app.middleware("http")
-async def add_request_id_middleware(request: Request, call_next):
-    rid = uuid.uuid4().hex[:8]
+async def request_context_middleware(request: Request, call_next):
+    """Outermost middleware: request id, security headers and one access-log line per request."""
+    rid = new_request_id(request.headers.get("x-request-id"))
     request.state.request_id = rid
-    start = time.time()
-    response = await call_next(request)
-    elapsed = round(time.time() - start, 3)
-    response.headers["X-Request-ID"] = rid
-    response.headers["X-Elapsed-Ms"] = str(int(elapsed * 1000))
-    response.headers["X-Frame-Options"] = "SAMEORIGIN"
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-XSS-Protection"] = "1; mode=block"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    return response
+    rid_token = request_id_var.set(rid)
+    user_token = user_var.set("")
+    start = time.perf_counter()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        response.headers["X-Request-ID"] = rid
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        return response
+    finally:
+        duration_ms = round((time.perf_counter() - start) * 1000, 1)
+        path = request.url.path
+        quiet = path.startswith(_QUIET_PATHS) and status < 400
+        principal = getattr(request.state, "principal", None)
+        if principal is not None:
+            user_var.set(principal.subject)
+        _access_logger.log(
+            logging.DEBUG if quiet else logging.INFO,
+            "%s %s -> %d in %.1f ms", request.method, path, status, duration_ms,
+            extra={
+                "method": request.method, "path": path, "status": status, "duration_ms": duration_ms,
+                "user": principal.subject if principal is not None else "-",
+            },
+        )
+        user_var.reset(user_token)
+        request_id_var.reset(rid_token)
 
 
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     # Full details go to the server log only; clients get a generic message + trace id.
-    rid = getattr(request.state, "request_id", None) or uuid.uuid4().hex[:8]
+    rid = getattr(request.state, "request_id", None) or current_request_id()
     logger.exception("[%s] Unhandled exception on %s %s: %s", rid, request.method, request.url.path, exc)
     return JSONResponse(
         status_code=500,
@@ -444,7 +468,7 @@ async def api_transcript_unified(request: UnifiedTranscriptRequest):
     from services.youtube.audio import AudioExtractionError
     from services.youtube.captions import CaptionsUnavailableError
 
-    rid = uuid.uuid4().hex[:8]
+    rid = current_request_id()
     transcript_metrics.record_request_start()
     out_lang = _normalize_output_mode(request.output_language, "en")
     if out_lang is None:
@@ -681,7 +705,7 @@ async def api_channel_transcripts(
     Returns channel info, statistics, and per-video results including metadata.
     Only processes videos with duration 3:00 <= duration < 30:00 (180s <= dur < 1800s).
     """
-    rid = uuid.uuid4().hex[:8]
+    rid = current_request_id()
     clean = handle.lstrip("@")
     start_time = time.time()
     logger.info(
@@ -1006,7 +1030,7 @@ async def api_start_channel_transcript_job(
 ):
     """Launch asynchronous background job for channel transcripts."""
     from services.jobs.transcript_job_manager import JobLimitError, transcript_job_manager
-    rid = uuid.uuid4().hex[:8]
+    rid = current_request_id()
     principal = _principal(request)
     try:
         eff_max = req.max_videos if req and req.max_videos > 0 else max_videos
@@ -1255,7 +1279,7 @@ async def api_transcript_csv_export(req: TranscriptExportRequest):
     Accepts either a video_url or a channel_handle. Returns a downloadable
     CSV file with one row per video. Never aborts on individual video failures.
     """
-    rid = uuid.uuid4().hex[:8]
+    rid = current_request_id()
     start_time = time.time()
     logger.info("[%s] Transcript CSV export request: video_url=%s, channel_handle=%s",
                 rid, req.video_url, req.channel_handle)

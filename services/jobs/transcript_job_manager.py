@@ -22,6 +22,7 @@ from pathlib import Path
 from config.settings import settings
 from models.transcript_job import JobStatus, TranscriptJobProgress, TranscriptVideoItem
 from services.duration_filter import evaluate_duration, parse_iso_duration
+from infrastructure.request_context import job_id_var
 from services.csv_safety import safe_csv_row
 from services.public_errors import public_message
 from services.transcript_limiter import transcript_limiter
@@ -32,9 +33,32 @@ _JOB_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
 def _to_thread(func, *args, **kwargs):
-    loop = asyncio.get_running_loop()
-    import functools
-    return loop.run_in_executor(None, functools.partial(func, *args, **kwargs))
+    """Blocking provider calls run in the thread pool with the job's logging context."""
+    return asyncio.to_thread(func, *args, **kwargs)
+
+
+def _job_duration_seconds(job: TranscriptJobProgress) -> float | None:
+    try:
+        started = datetime.fromisoformat(job.created_at.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return round((datetime.now(timezone.utc) - started).total_seconds(), 1)
+
+
+def _log_job_outcome(job: TranscriptJobProgress) -> None:
+    """One structured line per job end state (completed/failed/cancelled/paused)."""
+    level = logging.WARNING if job.status in (JobStatus.FAILED, JobStatus.PAUSED) else logging.INFO
+    logger.log(
+        level,
+        "Job %s %s after %ss: %d/%d success (captions=%d, stt=%d, no_captions=%d, rate_limited=%d, failed=%d)",
+        job.job_id, job.status.value, _job_duration_seconds(job), job.successful, job.eligible_videos,
+        job.caption_count, job.whisper_count, job.no_captions, job.rate_limited, job.failed,
+        extra={
+            "event": "job_finished", "status": job.status.value, "duration_seconds": _job_duration_seconds(job),
+            "channel": job.channel_handle, "output_language": job.output_language,
+            "videos_total": job.eligible_videos, "videos_success": job.successful, "videos_failed": job.failed,
+        },
+    )
 
 
 def parse_date_boundary(date_str: str | None, is_end_of_day: bool = False) -> datetime | None:
@@ -208,10 +232,17 @@ class TranscriptJobManager:
         """Run ``coro`` for ``job``; when it ends the job is released from the active set."""
         self._recent.pop(job.job_id, None)
         self._jobs[job.job_id] = job
-        task = asyncio.create_task(coro)
+        async def _with_job_context(job_id: str = job.job_id):
+            # The task copies the creating request's context (request id, user); add the job id.
+            job_id_var.set(job_id)
+            return await coro
+
+        task = asyncio.create_task(_with_job_context())
         self._tasks[job.job_id] = task
 
         def _release(done: asyncio.Task, job_id: str = job.job_id) -> None:
+            if done.cancelled():
+                coro.close()  # cancelled before it started: never awaited (no-op if it had run)
             if self._tasks.get(job_id) is not done:
                 return  # superseded by a resume that started a new task
             self._tasks.pop(job_id, None)
@@ -334,6 +365,7 @@ class TranscriptJobManager:
                 job.status = JobStatus.CANCELLED
                 job.updated_at = datetime.now(timezone.utc).isoformat()
                 self._save_checkpoint(job)
+                _log_job_outcome(job)
                 return True
         return False
 
@@ -639,6 +671,7 @@ class TranscriptJobManager:
             progress.error = "Channel discovery failed. Check the channel handle and try again."
             progress.updated_at = datetime.now(timezone.utc).isoformat()
             self._save_checkpoint(progress)
+            _log_job_outcome(progress)
 
     def _recalculate_counters(self, job: TranscriptJobProgress) -> None:
         """Update job progress counters accurately."""
@@ -822,6 +855,7 @@ class TranscriptJobManager:
                             job.error = "Paused due to persistent YouTube rate limiting. Resume when ready."
                             self._recalculate_counters(job)
                             self._save_checkpoint(job)
+                            _log_job_outcome(job)
                             return
 
                         # Retry same item after cooldown
@@ -892,11 +926,7 @@ class TranscriptJobManager:
             job.cooldown_seconds_remaining = 0.0
             self._recalculate_counters(job)
             self._save_checkpoint(job)
-            logger.info(
-                "Job %s completed: %d/%d success (captions=%d, whisper=%d, no_captions=%d, rate_limited=%d, failed=%d)",
-                job.job_id, job.successful, job.eligible_videos,
-                job.caption_count, job.whisper_count, job.no_captions, job.rate_limited, job.failed,
-            )
+            _log_job_outcome(job)
 
     def generate_csv(self, job_id: str, include_audit_columns: bool = False) -> str:
         """Generate compliant CSV for the job with exact representation matching job output mode."""

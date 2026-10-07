@@ -6,12 +6,13 @@ Every endpoint MUST return responses conforming to these models.
 from __future__ import annotations
 
 import time
-import uuid
 from dataclasses import dataclass, field, asdict
 from typing import Any, Generic, TypeVar
 
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
+from infrastructure.request_context import current_request_id
 
 T = TypeVar("T")
 
@@ -37,7 +38,7 @@ def success_response(
     request_id: str | None = None,
     status_code: int = 200,
 ) -> JSONResponse:
-    rid = request_id or uuid.uuid4().hex[:8]
+    rid = request_id or current_request_id()
     return JSONResponse(
         status_code=status_code,
         content={
@@ -58,7 +59,7 @@ def error_response(
     status_code: int = 500,
     error_code: str | None = None,
 ) -> JSONResponse:
-    rid = request_id or uuid.uuid4().hex[:8]
+    rid = request_id or current_request_id()
     if not errors and error_code:
         errors = [ErrorDetail(code=error_code, detail=message)]
     serialized_errors = None

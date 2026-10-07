@@ -131,6 +131,8 @@ class Settings:
         self.log_level: str = _env_choice(
             "LOG_LEVEL", "INFO", ("debug", "info", "warning", "error", "critical")
         ).upper()
+        # text (human readable) | json (one object per line, for log shippers)
+        self.log_format: str = _env_choice("LOG_FORMAT", "text", ("text", "json"))
         self.log_to_file: bool = _env_bool("LOG_TO_FILE", True)
         self.logs_dir: Path = _env_path("LOG_DIR", BASE_DIR / "logs")
 

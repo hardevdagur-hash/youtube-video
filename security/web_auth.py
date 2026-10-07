@@ -39,6 +39,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from infrastructure.rate_limiter import SlidingWindowRateLimiter
+from infrastructure.request_context import user_var
 from security.jwt_service import JWTConfig, JWTService
 from security.security_models import SecurityError
 
@@ -457,6 +458,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         principal = self.auth.authenticate_request(request)
         request.state.principal = principal
+        if principal is not None:
+            user_var.set(principal.subject)  # route and job-start log lines carry the user
 
         if principal is None and (method, path) not in PUBLIC_ENDPOINTS:
             return _deny(401, "UNAUTHENTICATED", "Authentication required.")

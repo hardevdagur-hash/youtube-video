@@ -205,7 +205,7 @@ def test_stdout_and_file_output_redacted(fake_secrets_env, isolated_logging, tmp
         h.flush()
 
     stdout = capsys.readouterr().out
-    file_text = (tmp_path / "export-engine.log").read_text(encoding="utf-8")
+    file_text = (tmp_path / "transcript-service.log").read_text(encoding="utf-8")
     errors_text = (tmp_path / "errors.log").read_text(encoding="utf-8")
 
     for output in (stdout, file_text, errors_text):
