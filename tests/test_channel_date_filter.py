@@ -15,8 +15,8 @@ from webapp.main import app
 
 
 @pytest.fixture
-def client():
-    return TestClient(app, raise_server_exceptions=False)
+def client(authed_client):
+    return authed_client
 
 
 def test_parse_date_boundary():

@@ -71,6 +71,7 @@ class TranscriptJobProgress(BaseModel):
     published_after: str | None = None
     published_before: str | None = None
     output_language: str = "en"
+    owner: str | None = None  # authenticated principal that created the job
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     completed_at: str | None = None

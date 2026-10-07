@@ -1,6 +1,5 @@
-# Environment
+# Environment (.env.example is a committed template with placeholders only)
 .env
-.env.example
 
 # Python
 __pycache__/

@@ -11,6 +11,7 @@ import csv
 import io
 import json
 import logging
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -23,6 +24,8 @@ from services.duration_filter import evaluate_duration, parse_iso_duration
 from transcript_reliability.transcript_limiter import transcript_limiter
 
 logger = logging.getLogger(__name__)
+
+_JOB_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
 def _to_thread(func, *args, **kwargs):
@@ -111,6 +114,9 @@ class TranscriptJobManager:
     def get_job(self, job_id: str) -> TranscriptJobProgress | None:
         job = self._jobs.get(job_id)
         if not job:
+            # Job IDs are uuid4().hex[:12]; reject anything else before touching the filesystem
+            if not _JOB_ID_RE.match(job_id or ""):
+                return None
             # Try disk
             target = self._jobs_dir / f"{job_id}.json"
             if target.exists():
@@ -147,6 +153,7 @@ class TranscriptJobManager:
         published_after: str | None = None,
         published_before: str | None = None,
         output_language: str = "en",
+        owner: str | None = None,
     ) -> TranscriptJobProgress:
         """Initialize and launch background transcript job for a YouTube channel."""
         clean_handle = channel_handle.strip().lstrip("@")
@@ -167,6 +174,7 @@ class TranscriptJobManager:
             published_after=published_after,
             published_before=published_before,
             output_language=output_language or "en",
+            owner=owner,
             videos=[],
         )
         self._jobs[job_id] = progress

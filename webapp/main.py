@@ -47,11 +47,12 @@ from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi import Path as PathParam
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from config.settings import is_youtube_api_key_valid, settings
 from export_engine.models import ExportRequest
@@ -66,6 +67,15 @@ from services.english_converter import english_converter
 from observability.config import ObservabilityConfig
 from observability.instrumentation import instrument_fastapi
 from observability.telemetry import TelemetryOrchestrator
+from security.web_auth import (
+    SESSION_COOKIE,
+    AuthMiddleware,
+    AuthSettings,
+    Principal,
+    WebAuthenticator,
+    can_access_owned,
+    cors_options,
+)
 from services.english_converter import english_converter
 
 setup_logging()
@@ -159,20 +169,28 @@ async def lifespan(app: FastAPI):
     _telemetry.shutdown()
 
 
-app = FastAPI(title="YouTube Export Tool v3 (Async)", lifespan=lifespan)
+# Security configuration: fails fast in production when credentials/secrets are unsafe
+_auth_settings = AuthSettings.from_env()
+_auth_settings.validate()
+_authenticator = WebAuthenticator(_auth_settings)
+
+app = FastAPI(
+    title="YouTube Export Tool v3 (Async)",
+    lifespan=lifespan,
+    # API schema/explorer are not exposed in production
+    openapi_url=None if _auth_settings.is_production else "/openapi.json",
+    docs_url=None if _auth_settings.is_production else "/docs",
+    redoc_url=None if _auth_settings.is_production else "/redoc",
+)
 
 # Observability: create orchestrator at module level; initialize() called in lifespan
 _telemetry = TelemetryOrchestrator(ObservabilityConfig.from_env())
 
-# Network/transport middleware first (innermost wrapping)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[settings.cors_origins] if settings.cors_origins != "*" else ["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Middleware (last added = outermost):
+#   instrumentation -> CORS -> request validation -> auth/authz/rate limit -> routes
+app.add_middleware(AuthMiddleware, authenticator=_authenticator)
 app.add_middleware(RequestValidationMiddleware)
+app.add_middleware(CORSMiddleware, **cors_options(_auth_settings))  # '*' is refused in production
 
 # Instrument FastAPI last (outermost wrapping â€” captures all requests)
 instrument_fastapi(app, _telemetry.metrics, _telemetry.tracing)
@@ -186,6 +204,7 @@ app.mount("/assets", StaticFiles(directory=str(_frontend_assets)), name="fronten
 @app.middleware("http")
 async def add_request_id_middleware(request: Request, call_next):
     rid = uuid.uuid4().hex[:8]
+    request.state.request_id = rid
     start = time.time()
     response = await call_next(request)
     elapsed = round(time.time() - start, 3)
@@ -201,19 +220,112 @@ async def add_request_id_middleware(request: Request, call_next):
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    rid = uuid.uuid4().hex[:8]
+    # Full details go to the server log only; clients get a generic message + trace id.
+    rid = getattr(request.state, "request_id", None) or uuid.uuid4().hex[:8]
     logger.exception("[%s] Unhandled exception on %s %s: %s", rid, request.method, request.url.path, exc)
-    import traceback
-    content: dict = {
-        "success": False,
-        "error": str(exc) or "An unexpected error occurred.",
-        "trace_id": rid,
-        "exception_type": type(exc).__name__,
-    }
     return JSONResponse(
         status_code=500,
-        content=content,
+        content={
+            "success": False,
+            "error": "Internal server error.",
+            "error_code": "INTERNAL_ERROR",
+            "trace_id": rid,
+        },
+        headers={"X-Request-ID": rid},
     )
+
+
+# ---------------------------------------------------------------------------
+# Authentication
+# ---------------------------------------------------------------------------
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
+def _principal(request: Request) -> Principal | None:
+    return getattr(request.state, "principal", None)
+
+
+def _not_found(rid: str | None = None) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"success": False, "error": "Job not found", "trace_id": rid})
+
+
+_EXPORT_OWNER_FILE = "owner"
+
+
+def _can_access_export(request: Request, job_id: str) -> bool:
+    """Export jobs record their creator in runs/<job_id>/owner; legacy jobs are admin-only."""
+    owner_path = RUNS_DIR / job_id / _EXPORT_OWNER_FILE
+    try:
+        owner = owner_path.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        owner = None
+    return can_access_owned(_principal(request), owner)
+
+
+def _can_access_transcript_job(request: Request, job) -> bool:
+    return can_access_owned(_principal(request), getattr(job, "owner", None))
+
+
+_HANDLE_RE = re.compile(r"^@?[A-Za-z0-9._-]{1,100}$")
+_LANG_RE = re.compile(r"^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})?$")
+_VIDEO_ID_PATTERN = r"^[A-Za-z0-9_-]{11}$"
+_JOB_ID_PATTERN = r"^[0-9a-f]{12}$"
+_HANDLE_PATTERN = r"^@?[A-Za-z0-9._-]{1,100}$"
+_MAX_SEGMENTS = 20000
+_MAX_CONCURRENCY = 10
+
+
+def _safe_filename_part(text: str) -> str:
+    """Restrict user-influenced text used in Content-Disposition filenames."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", text)[:80] or "channel"
+
+
+@app.post("/api/auth/login")
+async def api_auth_login(body: LoginRequest, request: Request):
+    ip = _authenticator.client_ip(request)
+    username = body.username.strip()
+    if not _authenticator.login_limiter.allow(f"ip:{ip}") or _authenticator.is_locked_out(username):
+        return JSONResponse(
+            status_code=429,
+            content={"success": False, "error": "Too many login attempts. Try again later.", "error_code": "RATE_LIMITED"},
+            headers={"Retry-After": "60"},
+        )
+    if not _authenticator.origin_allowed(request):
+        return JSONResponse(status_code=403, content={"success": False, "error": "Cross-site request rejected.", "error_code": "CSRF_REJECTED"})
+    principal = await _to_thread(_authenticator.authenticate_password, username, body.password)
+    if principal is None:
+        logger.warning("Failed login for user=%r from ip=%s", username[:64], ip)
+        return JSONResponse(status_code=401, content={"success": False, "error": "Invalid username or password.", "error_code": "INVALID_CREDENTIALS"})
+    token = _authenticator.issue_session(principal)
+    response = JSONResponse(content={"success": True, "user": {"username": principal.subject, "role": principal.role}})
+    response.set_cookie(
+        SESSION_COOKIE,
+        token,
+        max_age=_auth_settings.session_ttl_minutes * 60,
+        httponly=True,
+        secure=_auth_settings.is_production,
+        samesite="strict",
+        path="/",
+    )
+    logger.info("User %s logged in from ip=%s", principal.subject, ip)
+    return response
+
+
+@app.post("/api/auth/logout")
+async def api_auth_logout():
+    response = JSONResponse(content={"success": True})
+    response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=_auth_settings.is_production, samesite="strict")
+    return response
+
+
+@app.get("/api/auth/me")
+async def api_auth_me(request: Request):
+    principal = _principal(request)
+    return {"success": True, "user": {"username": principal.subject, "role": principal.role, "auth_method": principal.auth_method}}
 
 
 def _spa_index() -> FileResponse | HTMLResponse:
@@ -244,13 +356,23 @@ async def api_export(request: Request) -> dict:
     rid = uuid.uuid4().hex[:8]
     body = await request.json()
 
-    channel_input = body.get("channel", "").strip()
-    limit = int(body.get("limit", 0))
+    if not isinstance(body, dict):
+        return JSONResponse(status_code=422, content={"success": False, "error": "Request body must be a JSON object.", "trace_id": rid})
+    raw_channel = body.get("channel", "")
+    channel_input = raw_channel.strip() if isinstance(raw_channel, str) else ""
+    try:
+        limit = int(body.get("limit", 0) or 0)
+    except (TypeError, ValueError):
+        return JSONResponse(status_code=422, content={"success": False, "error": "limit must be an integer.", "trace_id": rid})
+    if limit < 0 or limit > settings.max_videos_per_job:
+        return JSONResponse(status_code=422, content={"success": False, "error": f"limit must be between 0 and {settings.max_videos_per_job}.", "trace_id": rid})
+    if limit == 0:
+        limit = settings.max_videos_per_job
 
-    if not channel_input:
+    if not channel_input or len(channel_input) > 500:
         return JSONResponse(status_code=400, content={"success": False, "error": "Channel identifier cannot be empty.", "trace_id": rid})
 
-    client_host = getattr(request.client, "host", None) or "unknown"
+    client_host = _authenticator.client_ip(request)
     if not rate_limiter.allow(f"export:{client_host}"):
         return JSONResponse(status_code=429, content={"success": False, "error": "Too many requests.", "trace_id": rid})
 
@@ -267,6 +389,8 @@ async def api_export(request: Request) -> dict:
     # Start async background task
     run_dir = RUNS_DIR / job_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    principal = _principal(request)
+    (run_dir / _EXPORT_OWNER_FILE).write_text(principal.subject if principal else "", encoding="utf-8")
 
     task = asyncio.create_task(_run_async_pipeline(job_id, export_req))
     async with _running_tasks_lock:
@@ -278,10 +402,12 @@ async def api_export(request: Request) -> dict:
 
 
 @app.get("/api/export/{job_id}/progress")
-async def api_export_progress(job_id: str) -> dict:
+async def api_export_progress(job_id: str, request: Request) -> dict:
     rid = uuid.uuid4().hex[:8]
     if not _safe_run_id(job_id):
         return {"success": False, "error": "Invalid job ID", "trace_id": rid}
+    if not _can_access_export(request, job_id):
+        return {"success": False, "error": "Job not found", "trace_id": rid}
 
     progress = await _async_pipeline.get_progress(job_id)
     if progress is None:
@@ -299,10 +425,12 @@ async def api_export_progress(job_id: str) -> dict:
 
 
 @app.get("/api/export/{job_id}/result")
-async def api_export_result(job_id: str) -> dict:
+async def api_export_result(job_id: str, request: Request) -> dict:
     rid = uuid.uuid4().hex[:8]
     if not _safe_run_id(job_id):
         return {"success": False, "error": "Invalid job ID", "trace_id": rid}
+    if not _can_access_export(request, job_id):
+        return {"success": False, "error": "Export not ready", "trace_id": rid}
 
     result = await _async_pipeline.get_result(job_id)
     if result is None:
@@ -319,10 +447,12 @@ async def api_export_result(job_id: str) -> dict:
 
 
 @app.get("/api/export/{job_id}/download")
-async def api_export_download(job_id: str):
+async def api_export_download(job_id: str, request: Request):
     rid = uuid.uuid4().hex[:8]
     if not _safe_run_id(job_id):
         return JSONResponse(status_code=400, content={"success": False, "error": "Invalid job ID", "trace_id": rid})
+    if not _can_access_export(request, job_id):
+        return JSONResponse(status_code=404, content={"success": False, "error": "CSV file not found", "trace_id": rid})
 
     csv_path = RUNS_DIR / job_id / "videos.csv"
     if not csv_path.exists():
@@ -334,10 +464,12 @@ async def api_export_download(job_id: str):
 
 
 @app.post("/api/export/{job_id}/cancel")
-async def api_export_cancel(job_id: str) -> dict:
+async def api_export_cancel(job_id: str, request: Request) -> dict:
     rid = uuid.uuid4().hex[:8]
     if not _safe_run_id(job_id):
         return {"success": False, "error": "Invalid job ID", "trace_id": rid}
+    if not _can_access_export(request, job_id):
+        return {"success": False, "error": "Job not running or already completed", "trace_id": rid}
 
     async with _running_tasks_lock:
         task = _running_tasks.get(job_id)
@@ -350,10 +482,12 @@ async def api_export_cancel(job_id: str) -> dict:
 
 
 @app.delete("/api/export/{job_id}")
-async def api_export_delete(job_id: str) -> dict:
+async def api_export_delete(job_id: str, request: Request):
     rid = uuid.uuid4().hex[:8]
     if not _safe_run_id(job_id):
         return {"success": False, "error": "Invalid job ID", "trace_id": rid}
+    if not _can_access_export(request, job_id):
+        return _not_found(rid)
     run_dir = RUNS_DIR / job_id
     if run_dir.exists():
         shutil.rmtree(str(run_dir), ignore_errors=True)
@@ -377,8 +511,11 @@ async def api_export_active() -> dict:
 
 
 @app.get("/api/health")
-async def api_health():
+async def api_health(request: Request):
     key_ok, key_error = is_youtube_api_key_valid()
+    if _principal(request) is None:
+        # Anonymous probes (load balancers, uptime checks) only learn the coarse status.
+        return success_response(data={"status": "ok" if key_ok else "degraded"}, message="Service health check")
     redis_healthy = False
     try:
         import redis as _redis
@@ -809,7 +946,12 @@ async def api_transcript_limiter_status():
 
 
 @app.get("/api/transcript/{video_id}")
-async def api_transcript(video_id: str, language: str | None = None, force_refresh: bool = False, allow_whisper: bool = True) -> dict:
+async def api_transcript(
+    video_id: str = PathParam(pattern=_VIDEO_ID_PATTERN),
+    language: str | None = Query(None, max_length=16),
+    force_refresh: bool = False,
+    allow_whisper: bool = True,
+) -> dict:
     rid = uuid.uuid4().hex[:8]
     logger.info("[%s] Transcript request: video_id=%s", rid, video_id)
     try:
@@ -822,20 +964,23 @@ async def api_transcript(video_id: str, language: str | None = None, force_refre
 
 
 @app.get("/api/transcript/{video_id}/all")
-async def api_transcript_all(video_id: str) -> dict:
+async def api_transcript_all(video_id: str = PathParam(pattern=_VIDEO_ID_PATTERN)) -> dict:
     rid = uuid.uuid4().hex[:8]
     service = _get_transcript_service()
     return await _to_thread(service.get_all_transcripts, video_id)
 
 
 @app.get("/api/transcript/{video_id}/status")
-async def api_transcript_status(video_id: str) -> dict:
+async def api_transcript_status(video_id: str = PathParam(pattern=_VIDEO_ID_PATTERN)) -> dict:
     service = _get_transcript_service()
     return await _to_thread(service.get_transcript_status, video_id)
 
 
 @app.get("/api/transcript/{video_id}/translate/{target_language}")
-async def api_translate_transcript(video_id: str, target_language: str) -> dict:
+async def api_translate_transcript(
+    video_id: str = PathParam(pattern=_VIDEO_ID_PATTERN),
+    target_language: str = PathParam(pattern=_LANG_RE.pattern),
+) -> dict:
     rid = uuid.uuid4().hex[:8]
     try:
         service = _get_transcript_service()
@@ -847,16 +992,17 @@ async def api_translate_transcript(video_id: str, target_language: str) -> dict:
 
 
 @app.get("/api/transcript/{video_id}/list-all")
-async def api_transcript_list_all(video_id: str) -> dict:
+async def api_transcript_list_all(video_id: str = PathParam(pattern=_VIDEO_ID_PATTERN)) -> dict:
     try:
         service = _get_transcript_service()
         return await _to_thread(service.get_transcript_status, video_id)
-    except Exception as exc:
-        return {"success": False, "video_id": video_id, "error": str(exc)}
+    except Exception:
+        logger.exception("Transcript list-all failed for %s", video_id)
+        return {"success": False, "video_id": video_id, "error": "Failed to list transcripts."}
 
 
 @app.post("/api/transcript/{video_id}/process")
-async def api_process_transcript(video_id: str, remove_fillers: bool = False) -> dict:
+async def api_process_transcript(video_id: str = PathParam(pattern=_VIDEO_ID_PATTERN), remove_fillers: bool = False) -> dict:
     import json
     transcript_service = _get_transcript_service()
     transcript = await _to_thread(transcript_service.get_transcript, video_id)
@@ -871,11 +1017,17 @@ async def api_process_transcript(video_id: str, remove_fillers: bool = False) ->
 async def api_process_transcript_direct(request: Request) -> dict:
     import json
     body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail={"success": False, "error": "Request body must be a JSON object."})
     segments = body.get("segments", [])
     vid = body.get("video_id", "")
     remove = body.get("remove_fillers", False)
     if not segments:
         raise HTTPException(status_code=400, detail={"success": False, "error": "No segments provided."})
+    if not isinstance(segments, list) or len(segments) > _MAX_SEGMENTS:
+        raise HTTPException(status_code=422, detail={"success": False, "error": f"segments must be a list of at most {_MAX_SEGMENTS} items."})
+    if not isinstance(vid, str) or len(vid) > 64:
+        raise HTTPException(status_code=422, detail={"success": False, "error": "Invalid video_id."})
     processor = _get_transcript_processor()
     result = await _to_thread(processor.process, segments=segments, video_id=vid, remove_fillers=remove)
     return json.loads(result.model_dump_json())
@@ -912,7 +1064,7 @@ def _format_duration(total_seconds: int) -> str:
 
 
 @app.get("/api/transcriptv2/{video_id}")
-async def api_transcript_v2(video_id: str):
+async def api_transcript_v2(video_id: str = PathParam(pattern=_VIDEO_ID_PATTERN)):
     """Return ONLY title, duration, and transcript text for a video.
 
     Minimal endpoint for the simplified Transcript workflow. Fetches only
@@ -1013,9 +1165,9 @@ async def api_transcript_v2(video_id: str):
 
 @app.get("/api/channel/{handle}/transcripts")
 async def api_channel_transcripts(
-    handle: str,
-    limit: int = 100,
-    concurrency: int = 5,
+    handle: str = PathParam(pattern=_HANDLE_PATTERN),
+    limit: int = Query(100, ge=1, le=settings.max_videos_sync_export),
+    concurrency: int = Query(5, ge=1, le=_MAX_CONCURRENCY),
     allow_whisper: bool = True,
 ):
     """Fetch transcripts for a YouTube channel with duration filtering (3–30 min).
@@ -1257,7 +1409,7 @@ async def api_channel_transcripts(
                             "source": None,
                             "method": None,
                             "error_code": "STT_FAILED",
-                            "error_message": f"Speech-to-text failed: {exc}",
+                            "error_message": "Speech-to-text failed.",
                         }
 
                 # Captions unavailable and whisper disabled
@@ -1317,7 +1469,7 @@ async def api_channel_transcripts(
     except Exception as exc:
         logger.exception("[%s] Channel transcript failed for %s", rid, handle)
         return error_response(
-            message=f"Failed to fetch channel transcripts: {exc}",
+            message=f"Failed to fetch channel transcripts (trace {rid}).",
             status_code=500,
         )
 
@@ -1326,29 +1478,34 @@ async def api_channel_transcripts(
 
 
 class TranscriptJobCreateRequest(BaseModel):
-    max_videos: int = 0
+    max_videos: int = Field(0, ge=0, le=settings.max_videos_per_job)
     force_refresh: bool = False
-    caption_concurrency: int = 1
-    whisper_concurrency: int = 1
-    published_after: str | None = None
-    published_before: str | None = None
-    output_language: str = "en"
+    caption_concurrency: int = Field(1, ge=1, le=_MAX_CONCURRENCY)
+    whisper_concurrency: int = Field(1, ge=1, le=_MAX_CONCURRENCY)
+    published_after: str | None = Field(None, max_length=40)
+    published_before: str | None = Field(None, max_length=40)
+    output_language: str = Field("en", max_length=20)
 
 
 @app.post("/api/channel/{handle}/transcript-job")
 async def api_start_channel_transcript_job(
-    handle: str,
-    max_videos: int = 0,
+    request: Request,
+    handle: str = PathParam(pattern=_HANDLE_PATTERN),
+    max_videos: int = Query(0, ge=0, le=settings.max_videos_per_job),
     force_refresh: bool = False,
-    published_after: str | None = None,
-    published_before: str | None = None,
-    output_language: str = "en",
+    published_after: str | None = Query(None, max_length=40),
+    published_before: str | None = Query(None, max_length=40),
+    output_language: str = Query("en", max_length=20),
     req: TranscriptJobCreateRequest | None = None,
 ):
     """Launch asynchronous background job for channel transcripts."""
     from services.jobs.transcript_job_manager import transcript_job_manager
+    rid = uuid.uuid4().hex[:8]
+    principal = _principal(request)
     try:
         eff_max = req.max_videos if req and req.max_videos > 0 else max_videos
+        # 0 means "all eligible videos", bounded by the configured per-job cap
+        eff_max = min(eff_max or settings.max_videos_per_job, settings.max_videos_per_job)
         eff_refresh = req.force_refresh if req else force_refresh
         eff_caption_conc = req.caption_concurrency if req else settings.transcript_max_concurrency
         eff_whisper_conc = req.whisper_concurrency if req else 1
@@ -1365,30 +1522,34 @@ async def api_start_channel_transcript_job(
             published_after=eff_pub_after,
             published_before=eff_pub_before,
             output_language=eff_out_lang,
+            owner=principal.subject if principal else None,
         )
         return success_response(
             data=progress.model_dump(),
             message=f"Transcript job {progress.job_id} queued for {progress.channel_title or handle}",
         )
     except Exception as exc:
-        logger.exception("Failed to start channel transcript job: %s", exc)
-        return error_response(message=f"Failed to start job: {exc}", status_code=500)
+        logger.exception("[%s] Failed to start channel transcript job: %s", rid, exc)
+        return error_response(message=f"Failed to start job (trace {rid}).", status_code=500)
 
 
 @app.get("/api/transcript/jobs/{job_id}")
-async def api_get_transcript_job_status(job_id: str):
+async def api_get_transcript_job_status(request: Request, job_id: str = PathParam(pattern=_JOB_ID_PATTERN)):
     """Poll progress, counters, and video results for a background job."""
     from services.jobs.transcript_job_manager import transcript_job_manager
     job = transcript_job_manager.get_job(job_id)
-    if not job:
+    if not job or not _can_access_transcript_job(request, job):
         return error_response(message=f"Job '{job_id}' not found", status_code=404)
     return success_response(data=job.model_dump())
 
 
 @app.post("/api/transcript/jobs/{job_id}/cancel")
-async def api_cancel_transcript_job(job_id: str):
+async def api_cancel_transcript_job(request: Request, job_id: str = PathParam(pattern=_JOB_ID_PATTERN)):
     """Cancel a running background transcript job."""
     from services.jobs.transcript_job_manager import transcript_job_manager
+    job = transcript_job_manager.get_job(job_id)
+    if not job or not _can_access_transcript_job(request, job):
+        return error_response(message=f"Job '{job_id}' could not be cancelled or not found", status_code=400)
     cancelled = await transcript_job_manager.cancel_job(job_id)
     if not cancelled:
         return error_response(message=f"Job '{job_id}' could not be cancelled or not found", status_code=400)
@@ -1396,9 +1557,12 @@ async def api_cancel_transcript_job(job_id: str):
 
 
 @app.post("/api/transcript/jobs/{job_id}/resume")
-async def api_resume_transcript_job(job_id: str):
+async def api_resume_transcript_job(request: Request, job_id: str = PathParam(pattern=_JOB_ID_PATTERN)):
     """Resume a pending, paused, or rate-limited background job."""
     from services.jobs.transcript_job_manager import transcript_job_manager
+    existing = transcript_job_manager.get_job(job_id)
+    if not existing or not _can_access_transcript_job(request, existing):
+        return error_response(message=f"Job '{job_id}' not found", status_code=404)
     job = await transcript_job_manager.resume_job(job_id)
     if not job:
         return error_response(message=f"Job '{job_id}' not found", status_code=404)
@@ -1407,14 +1571,16 @@ async def api_resume_transcript_job(job_id: str):
 
 
 @app.get("/api/transcript/jobs/{job_id}/download")
-async def api_download_transcript_job(job_id: str, audit: bool = False):
+async def api_download_transcript_job(
+    request: Request, job_id: str = PathParam(pattern=_JOB_ID_PATTERN), audit: bool = False,
+):
     """Download CSV for a transcript background job with exact mode representation."""
     from services.jobs.transcript_job_manager import transcript_job_manager
     job = transcript_job_manager.get_job(job_id)
-    if not job:
+    if not job or not _can_access_transcript_job(request, job):
         return error_response(message=f"Job '{job_id}' not found", status_code=404)
     csv_content = transcript_job_manager.generate_csv(job_id, include_audit_columns=audit)
-    clean_handle = (job.channel_handle or "channel").lstrip("@")
+    clean_handle = _safe_filename_part((job.channel_handle or "channel").lstrip("@"))
     filename = f"{clean_handle}_transcripts_{job_id}.csv"
     encoded = csv_content.encode("utf-8-sig")
     return StreamingResponse(
@@ -1433,11 +1599,16 @@ async def api_download_transcript_job(job_id: str, audit: bool = False):
 
 
 class TranscriptExportRequest(BaseModel):
-    video_url: str | None = None
-    channel_handle: str | None = None
-    format: str = "csv"
-    max_videos: int = 1000
-    output_language: str = "original"
+    video_url: str | None = Field(None, max_length=2048)
+    channel_handle: str | None = Field(None, pattern=_HANDLE_PATTERN)
+    format: str = Field("csv", max_length=10)
+    # Synchronous: every video is fetched inside the request, so the cap is lower
+    max_videos: int = Field(
+        default_factory=lambda: settings.max_videos_sync_export,
+        ge=1,
+        le=settings.max_videos_sync_export,
+    )
+    output_language: str = Field("original", max_length=20)
     include_audit_columns: bool = False
 
 
@@ -1739,7 +1910,7 @@ async def api_transcript_csv_export(req: TranscriptExportRequest):
                             "source": None,
                             "method": None,
                             "error_code": "EXTRACTION_ERROR",
-                            "error_message": f"Speech-to-text failed: {exc}",
+                            "error_message": "Speech-to-text failed.",
                         }
 
             tasks = [_fetch_one(vid) for vid in eligible]
@@ -1822,7 +1993,7 @@ async def api_transcript_csv_export(req: TranscriptExportRequest):
             except Exception as exc:
                 logger.warning("[%s] Transcript fetch failed for %s: %s", rid, video_id, exc)
                 error_code = "EXTRACTION_ERROR"
-                error_message = str(exc)
+                error_message = "Transcript extraction failed."
 
             # If Simple English is explicitly requested, check for cached translation
             if req.output_language == "en" and status == "success" and transcript_text:
@@ -1870,7 +2041,7 @@ async def api_transcript_csv_export(req: TranscriptExportRequest):
 
         filename = "transcripts.csv"
         if req.channel_handle:
-            clean = req.channel_handle.lstrip("@")
+            clean = _safe_filename_part(req.channel_handle.lstrip("@"))
             filename = f"{clean}_transcripts.csv"
 
         return StreamingResponse(
@@ -1885,7 +2056,7 @@ async def api_transcript_csv_export(req: TranscriptExportRequest):
     except Exception as exc:
         logger.exception("[%s] CSV export failed", rid)
         return error_response(
-            message=f"Transcript CSV export failed: {exc}",
+            message=f"Transcript CSV export failed (trace {rid}).",
             status_code=500,
         )
 
@@ -1894,7 +2065,7 @@ async def api_transcript_csv_export(req: TranscriptExportRequest):
 # --- Validation endpoint ---
 
 @app.get("/api/validate-url")
-async def api_validate_url(url: str = "") -> dict:
+async def api_validate_url(url: str = Query("", max_length=2048)) -> dict:
     from services.youtube_url_parser import YouTubeURLParser
     parser = YouTubeURLParser()
     result = await _to_thread(parser.parse, url)
@@ -1904,7 +2075,7 @@ async def api_validate_url(url: str = "") -> dict:
 # --- Video metadata endpoint ---
 
 @app.get("/api/video-metadata/{video_id}")
-async def api_video_metadata(video_id: str) -> dict:
+async def api_video_metadata(video_id: str = PathParam(pattern=_VIDEO_ID_PATTERN)) -> dict:
     service = _get_metadata_service()
     result = await _to_thread(service.get_metadata, video_id)
     return result.model_dump()

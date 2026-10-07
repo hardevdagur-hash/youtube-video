@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Github, Moon, Sun, Menu, X } from 'lucide-react';
+import { Github, LogOut, Moon, Sun, Menu, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useTheme } from '../../theme/ThemeContext';
+import { useAuth } from '../../auth/AuthContext';
 import { Button } from '../ui';
 
 const navLinks = [
@@ -13,6 +14,7 @@ const navLinks = [
 
 export default function Navbar() {
   const { dark, toggle } = useTheme();
+  const { user, logout } = useAuth();
   const [scrolled, setScrolled] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const location = useLocation();
@@ -110,6 +112,21 @@ export default function Navbar() {
             >
               {dark ? <Sun size={18} /> : <Moon size={18} />}
             </button>
+
+            {user && (
+              <button
+                onClick={logout}
+                className={`p-2 rounded-lg transition-all-200 ${
+                  showBg
+                    ? 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800'
+                    : 'text-white/80 hover:text-white hover:bg-white/10'
+                }`}
+                aria-label={`Sign out ${user.username}`}
+                title={`Sign out ${user.username}`}
+              >
+                <LogOut size={18} />
+              </button>
+            )}
           </nav>
 
           <button
@@ -164,6 +181,14 @@ export default function Navbar() {
               >
                 {dark ? <Sun size={16} /> : <Moon size={16} />} {dark ? 'Light Mode' : 'Dark Mode'}
               </button>
+              {user && (
+                <button
+                  onClick={logout}
+                  className="flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 w-full"
+                >
+                  <LogOut size={16} /> Sign out ({user.username})
+                </button>
+              )}
             </div>
           </motion.div>
         )}

@@ -9,8 +9,8 @@ from webapp.main import UnifiedTranscriptRequest, app
 
 
 @pytest.fixture
-def client():
-    return TestClient(app, raise_server_exceptions=False)
+def client(authed_client):
+    return authed_client
 
 
 def test_unified_transcript_request_default():

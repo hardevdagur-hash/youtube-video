@@ -125,7 +125,11 @@ class Settings:
 
     # Security
     rate_limit_per_minute: int = int(_get_env("RATE_LIMIT_PER_MINUTE", "30"))
-    cors_origins: str = _get_env("CORS_ORIGINS", "*")
+    # Comma-separated browser origins allowed for CORS. Empty = same-origin only.
+    cors_origins: str = _get_env("CORS_ORIGINS", "")
+    # Abuse limits on job size (each video can cost YouTube quota and STT credits)
+    max_videos_per_job: int = int(_get_env("MAX_VIDEOS_PER_JOB", "1000"))
+    max_videos_sync_export: int = int(_get_env("MAX_VIDEOS_SYNC_EXPORT", "1000"))
 
     def __init__(self) -> None:
         """Create directories on initialization."""
@@ -162,7 +166,9 @@ except Exception:
         export_csv_batch_size = 50
         export_timeout_minutes = 30
         rate_limit_per_minute = 30
-        cors_origins = "*"
+        cors_origins = _get_env("CORS_ORIGINS", "")
+        max_videos_per_job = int(_get_env("MAX_VIDEOS_PER_JOB", "1000"))
+        max_videos_sync_export = int(_get_env("MAX_VIDEOS_SYNC_EXPORT", "1000"))
         openai_api_key = _get_env("OPENAI_API_KEY", "")
         groq_api_key = _get_env("GROQ_API_KEY", "")
         groq_whisper_model = _get_env("GROQ_WHISPER_MODEL", "whisper-large-v3")

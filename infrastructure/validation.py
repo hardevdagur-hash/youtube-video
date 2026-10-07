@@ -42,16 +42,28 @@ class RequestValidationMiddleware(BaseHTTPMiddleware):
                 )
 
             if request.method in ("POST", "PUT", "PATCH"):
-                content_length = request.headers.get("content-length")
-                if content_length and int(content_length) > MAX_BODY_SIZE:
+                raw_length = request.headers.get("content-length")
+                try:
+                    content_length = int(raw_length) if raw_length else 0
+                except ValueError:
+                    content_length = -1
+                if content_length < 0:
+                    return error_response(
+                        message="Invalid Content-Length header",
+                        status_code=400,
+                        request_id=rid,
+                    )
+                if content_length > MAX_BODY_SIZE:
                     return error_response(
                         message="Request body too large",
                         status_code=413,
                         request_id=rid,
                     )
 
+                # Body-less action POSTs (cancel/resume/logout) need no Content-Type
+                has_body = content_length > 0 or "transfer-encoding" in request.headers
                 content_type = request.headers.get("content-type", "")
-                if "application/json" not in content_type:
+                if has_body and "application/json" not in content_type:
                     return error_response(
                         message="Content-Type must be application/json",
                         status_code=415,
