@@ -203,9 +203,13 @@ export default function Transcript() {
           return;
         }
 
-        // Establish canonical verbatim source (IMMUTABLE)
-        const rawText = data.raw_transcript || data.transcript;
-        const rawSegs = data.raw_segments && data.raw_segments.length > 0 ? data.raw_segments : data.segments;
+        // Establish canonical verbatim source (IMMUTABLE). Never fall back to the
+        // translated text: when a translation was returned, only raw_* is the original.
+        const isOriginalPayload = data.output_language === 'original';
+        const rawText = data.raw_transcript || (isOriginalPayload ? data.transcript : '');
+        const rawSegs = data.raw_segments && data.raw_segments.length > 0
+          ? data.raw_segments
+          : (isOriginalPayload ? data.segments : []);
         setCanonicalData({
           transcript: rawText,
           segments: rawSegs || [],
@@ -414,7 +418,7 @@ export default function Transcript() {
           setChannelVideos(job.videos);
         }
       } else {
-        const videos = await transcriptService.fetchChannelTranscriptsSimple(handle, maxVideos);
+        const videos = await transcriptService.fetchChannelTranscriptsSimple(handle, maxVideos, 5, true, channelOutputLang);
         setChannelVideos(videos);
         setChannelLoading(false);
       }

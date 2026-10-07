@@ -103,6 +103,14 @@ class TranscriptService:
         self._text_cleaner = text_cleaner or TextCleaner()
         self._use_cache = use_cache
 
+    @staticmethod
+    def _is_translated_whisper_result(result: TranscriptResult) -> bool:
+        """True for Whisper results not produced by verbatim transcription (legacy task=translate)."""
+        if result.source != TranscriptSource.WHISPER:
+            return False
+        info = getattr(result, "whisper_info", None)
+        return getattr(info, "task", None) != "transcribe"
+
     def _get_whisper_provider(self) -> TranscriptProvider:
         """Lazy-load the Whisper provider (may fail if deps missing)."""
         if self._whisper_provider is None:
@@ -158,12 +166,10 @@ class TranscriptService:
                     for s in (cached.pipeline_steps or [])
                 ):
                     logger.info("Ignoring cached caption failure for %s because allow_whisper=True and Whisper not yet attempted", video_id)
-                elif cached.success and allow_whisper and output_format != "original" and (
-                    str(cached.language).lower() in ("hi", "hindi", "ur", "urdu", "hinglish")
-                    or english_converter.contains_non_roman_script(cached.plain_text or "")
-                    or (cached.source != TranscriptSource.WHISPER and hinglish_normalizer.is_hinglish_or_hindi(cached.plain_text or ""))
-                ):
-                    logger.info("Ignoring cached non-English caption for %s because allow_whisper=True and output_format != 'original'", video_id)
+                elif cached.success and self._is_translated_whisper_result(cached):
+                    # Produced while Whisper ran with task="translate": its "raw" text is an
+                    # English translation, not the spoken original. Recompute instead.
+                    logger.info("Ignoring cached translated Whisper transcript for %s; re-transcribing verbatim", video_id)
                 else:
                     logger.info("Returning cached transcript for %s (source=%s)", video_id, cached.source)
                     # Canonical healing: If Original Spoken requested and raw_transcript exists, ensure authentic verbatim text
@@ -228,17 +234,9 @@ class TranscriptService:
             best_step = step_auto
             logger.debug("Using AUTO transcript for %s (manual unavailable)", video_id)
 
-        # If caption candidate is in Hindi/non-English and allow_whisper is True,
-        # fallback to Whisper STT ONLY IF output_format is not 'original'
-        if best_step and allow_whisper and output_format not in ("original", "original_spoken"):
-            cand_res = best_step.get("result")
-            if cand_res:
-                cand_lang = (getattr(cand_res, "language", "") or "").lower()
-                cand_text = getattr(cand_res, "plain_text", "") or ""
-                if cand_lang in ("hi", "hindi", "ur", "urdu", "hinglish") or english_converter.contains_non_roman_script(cand_text):
-                    logger.info("Caption candidate for %s is in %s (non-English). Falling back to Whisper STT for English translation.", video_id, cand_lang)
-                    best_step = None
-
+        # Captions in the spoken language are the canonical source in every output mode.
+        # (Whisper transcribes verbatim, so re-running it for non-English captions would
+        # not yield English; English/Hindi output comes from the translation step.)
         if best_step:
             result = self._finalize(best_step["result"], pipeline_steps, start_time, video_title=video_title, channel_title=channel_title, output_format=output_format)
             self._repository.save(result)

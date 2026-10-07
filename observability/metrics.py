@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from functools import wraps
 from typing import Any, Callable, Generator, TypeVar
 
-from prometheus_client import Counter, Gauge, Histogram, start_http_server
+from prometheus_client import REGISTRY, CollectorRegistry, Counter, Gauge, Histogram, start_http_server
 from prometheus_client.metrics import MetricWrapperBase
 
 from observability.config import ObservabilityConfig
@@ -14,11 +14,32 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 
 class MetricsManager:
-    def __init__(self, config: ObservabilityConfig):
+    def __init__(self, config: ObservabilityConfig, registry: CollectorRegistry | None = None):
         self._config = config
         self._prefix = config.metrics_prefix
         self._initialized = False
         self._metrics: dict[str, MetricWrapperBase] = {}
+        # Defaults to the process-wide registry served by start_http_server(); tests and
+        # embedded uses can pass an isolated CollectorRegistry.
+        self._registry = registry if registry is not None else REGISTRY
+
+    def _create(self, cls: type, name: str, label_names: list[str] | tuple[str, ...] = ()) -> Any:
+        """Register a metric, reusing an identical one already in the registry.
+
+        Several MetricsManager instances share the default registry; registering the
+        same metric twice would otherwise raise ``Duplicated timeseries``.
+        """
+        full_name = self._name(name)
+        try:
+            return cls(full_name, name, list(label_names), registry=self._registry)
+        except ValueError:
+            existing = getattr(self._registry, "_names_to_collectors", {}).get(full_name)
+            if (
+                isinstance(existing, cls)
+                and tuple(getattr(existing, "_labelnames", ())) == tuple(label_names)
+            ):
+                return existing
+            raise
 
     def initialize(self) -> None:
         if self._initialized or not self._config.metrics_enabled:
@@ -36,28 +57,25 @@ class MetricsManager:
         key = f"{metric_type}:{name}:{':'.join(sorted(label_names))}"
         if key not in self._metrics:
             cls = {"counter": Counter, "gauge": Gauge, "histogram": Histogram}[metric_type]
-            self._metrics[key] = cls(self._name(name), name, label_names)
+            self._metrics[key] = self._create(cls, name, label_names)
         return self._metrics[key]
 
     def _get_counter(self, name: str) -> Counter:
-        from prometheus_client import Counter as PCounter
         key = f"counter:{name}:"
         if key not in self._metrics:
-            self._metrics[key] = PCounter(self._name(name), name)
+            self._metrics[key] = self._create(Counter, name)
         return self._metrics[key]
 
     def _get_gauge(self, name: str) -> Gauge:
-        from prometheus_client import Gauge as PGauge
         key = f"gauge:{name}:"
         if key not in self._metrics:
-            self._metrics[key] = PGauge(self._name(name), name)
+            self._metrics[key] = self._create(Gauge, name)
         return self._metrics[key]
 
     def _get_histogram(self, name: str) -> Histogram:
-        from prometheus_client import Histogram as PHistogram
         key = f"histogram:{name}:"
         if key not in self._metrics:
-            self._metrics[key] = PHistogram(self._name(name), name)
+            self._metrics[key] = self._create(Histogram, name)
         return self._metrics[key]
 
     def counter(self, name: str, *label_names: str) -> Counter:

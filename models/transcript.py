@@ -35,6 +35,9 @@ class WhisperProcessingInfo(BaseModel):
     language_confidence: float | None = Field(default=None)
     word_timestamps: bool = Field(default=False)
     audio_download_time_seconds: float | None = Field(default=None)
+    # "transcribe" = verbatim spoken language. None = produced before this field existed,
+    # when Whisper ran with task="translate" (English output), so it is not the original.
+    task: str | None = Field(default=None, description="Whisper task used: transcribe | translate")
 
 
 class PipelineStep(BaseModel):

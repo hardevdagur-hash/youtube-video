@@ -32,6 +32,9 @@ from services.english_converter import english_converter
 
 logger = logging.getLogger(__name__)
 
+# Verbatim transcription in the spoken language (never "translate", which outputs English).
+WHISPER_TASK = "transcribe"
+
 
 class WhisperProvider(TranscriptProvider):
     """Stage 3 provider: downloads audio and transcribes with Whisper.
@@ -155,17 +158,20 @@ class WhisperProvider(TranscriptProvider):
         )
         initial_prompt = ". ".join(prompt_parts)
 
+        # Always transcribe verbatim in the spoken language. Whisper's task="translate"
+        # outputs English, which would corrupt the canonical "Original Spoken" text;
+        # English / Hindi output is produced later by the explicit translation step.
         try:
             stt_result = self._stt.transcribe(
                 str(audio_path),
                 language=language,
-                task="translate",
+                task=WHISPER_TASK,
                 initial_prompt=initial_prompt,
             )
         except TypeError:
             # Fallback for clients without task or initial_prompt parameter
             try:
-                stt_result = self._stt.transcribe(str(audio_path), language=language, task="translate")
+                stt_result = self._stt.transcribe(str(audio_path), language=language, task=WHISPER_TASK)
             except TypeError:
                 stt_result = self._stt.transcribe(str(audio_path), language=language)
         except Exception as exc:
@@ -190,15 +196,17 @@ class WhisperProvider(TranscriptProvider):
         raw_plain_text = " ".join(seg.text for seg in segments)
         duration = segments[-1].end if segments else 0
 
-        # Convert and polish transcript to English (India) with title & channel context
+        # raw_transcript stays verbatim in the spoken language (the "Original Spoken" source).
+        # plain_text is the romanised/cleaned rendering of the same words (transliteration,
+        # not translation); real English comes only from the explicit translation step.
+        detected = (getattr(stt_result, "language", None) or language or "").lower()
         english_converter.convert_segments(segments, title=title, channel=channel_title)
         plain_text = english_converter.convert(raw_plain_text, title=title, channel=channel_title)
-        final_language = "English (India)"
-        final_confidence = 0.99
-
-        # Quality validation
-        val_result = english_converter.validate_transcript(plain_text, raw_plain_text, title=title)
-        logger.info("Transcript quality validation for %s: %s", video_id, val_result)
+        if detected in ("hi", "ur", "hindi", "urdu") or english_converter.contains_non_roman_script(raw_plain_text):
+            final_language = "Hinglish"
+        else:
+            final_language = detected or "unknown"
+        final_confidence = getattr(stt_result, "language_confidence", None) or 0.99
 
         paragraph_text = self._text_cleaner.build_paragraphs(segments)
         word_count = len(plain_text.split())
@@ -231,6 +239,7 @@ class WhisperProvider(TranscriptProvider):
                 language_confidence=stt_result.language_confidence,
                 word_timestamps=True,
                 audio_download_time_seconds=time.time() - download_start,
+                task=WHISPER_TASK,
             ),
             error=None,
         )

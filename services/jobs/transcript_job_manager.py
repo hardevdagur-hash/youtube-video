@@ -608,12 +608,15 @@ class TranscriptJobManager:
                                 video_id=item.video_id,
                                 force_refresh=force_refresh,
                                 allow_whisper=True,
+                                output_format=getattr(job, "output_language", "original"),
                             )
                             if whisper_res.success and (whisper_res.plain_text or whisper_res.paragraph_text):
                                 item.status = "success"
                                 item.transcript = whisper_res.plain_text or whisper_res.paragraph_text or ""
                                 item.raw_transcript = getattr(whisper_res, "raw_transcript", "") or item.transcript
                                 item.language = whisper_res.language or "Hinglish"
+                                item.source_language = str(getattr(whisper_res, "source_language", None) or item.language)
+                                item.source_language_code = str(getattr(whisper_res, "source_language_code", None) or "")
                                 item.source = "whisper"
                                 item.method = "speech_to_text"
                                 item.completed_at = datetime.now(timezone.utc).isoformat()

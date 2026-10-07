@@ -360,12 +360,45 @@ class YouTubeTranscriptClient:
             return self._find_best_auto(candidates, langs)
         return self._find_best_any(candidates, langs)
 
+    @staticmethod
+    def _spoken_language_code(candidates: list[Any]) -> str | None:
+        """Language actually spoken in the video, if YouTube's speech recognition reports it.
+
+        Auto-generated (ASR) tracks are produced from the audio, so their language is
+        the spoken language. Manual tracks in any other language are translations.
+        """
+        for t in candidates:
+            if t.is_generated and t.language_code:
+                return t.language_code
+        return None
+
+    @staticmethod
+    def _same_language(code_a: str | None, code_b: str | None) -> bool:
+        if not code_a or not code_b:
+            return False
+        return code_a.lower().split("-")[0] == code_b.lower().split("-")[0]
+
     def _find_best_manual(
         self,
         candidates: list[Any],
         langs: list[str],
     ) -> tuple[list[dict[str, Any]], str, bool, str | None]:
         """Select best manually-created transcript only, prioritizing original language."""
+
+        spoken = self._spoken_language_code(candidates)
+        if spoken:
+            # Manual tracks in another language are translations, never the spoken original.
+            for t in candidates:
+                if not t.is_generated and self._same_language(t.language_code, spoken):
+                    _log_transcript_candidate(t, "ACCEPTED", f"Priority M0: manual in spoken language {spoken}")
+                    return self._to_dicts(t.fetch()), t.language_code, True, None
+            for t in candidates:
+                if not t.is_generated:
+                    _log_transcript_candidate(t, "rejected", f"manual track is a translation (spoken={spoken})")
+            raise NoTranscriptFoundError(
+                f"No manual transcript in the spoken language ({spoken}); "
+                "manual tracks in other languages are translations."
+            )
 
         # Priority M1: Manual in preferred languages (exact/prefix match, native)
         for lang in langs:
@@ -430,6 +463,19 @@ class YouTubeTranscriptClient:
         langs: list[str],
     ) -> tuple[list[dict[str, Any]], str, bool, str | None]:
         """Select best transcript of any type, preserving original source representation."""
+
+        spoken = self._spoken_language_code(candidates)
+        if spoken:
+            # Priority 0: manual track in the spoken language, then the ASR track itself.
+            # Manual tracks in other languages are translations, not the original speech.
+            for t in candidates:
+                if not t.is_generated and self._same_language(t.language_code, spoken):
+                    _log_transcript_candidate(t, "ACCEPTED", f"Priority 0: manual in spoken language {spoken}")
+                    return self._to_dicts(t.fetch()), t.language_code, True, None
+            for t in candidates:
+                if t.is_generated and self._same_language(t.language_code, spoken):
+                    _log_transcript_candidate(t, "ACCEPTED", f"Priority 0: auto in spoken language {spoken}")
+                    return self._to_dicts(t.fetch()), t.language_code, False, None
 
         # Priority 1: Manual in preferred languages (native)
         for lang in langs:

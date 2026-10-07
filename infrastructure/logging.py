@@ -9,6 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from config.settings import settings
+from infrastructure.log_redaction import (
+    NOISY_HTTP_LOGGERS,
+    RedactingFormatter,
+    install_secret_redaction,
+    redact,
+)
 
 
 class StructuredFormatter(logging.Formatter):
@@ -31,16 +37,16 @@ class StructuredFormatter(logging.Formatter):
             log_entry["job_id"] = record.job_id
         if record.exc_info and record.exc_info[0]:
             log_entry["exception"] = self.formatException(record.exc_info)
-        if record.args:
+        if record.args or getattr(record, "had_args", False):
             extra = {k: v for k, v in record.__dict__.items() if k not in (
                 "args", "asctime", "created", "exc_info", "exc_text", "filename",
                 "funcName", "levelname", "levelno", "lineno", "module", "msecs",
                 "message", "msg", "name", "pathname", "process", "processName",
-                "relativeCreated", "stack_info", "thread", "threadName",
+                "relativeCreated", "stack_info", "thread", "threadName", "had_args",
             )}
             if extra:
                 log_entry["extra"] = extra
-        return json.dumps(log_entry, default=str)
+        return redact(json.dumps(log_entry, default=str))
 
 
 class ExportLoggerAdapter(logging.LoggerAdapter):
@@ -56,6 +62,8 @@ class ExportLoggerAdapter(logging.LoggerAdapter):
 
 def setup_logging() -> None:
     """Configure structured logging for the entire application."""
+    # Redact credentials from every log record before any handler sees it.
+    install_secret_redaction()
     log_dir = settings.logs_dir
     log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -67,6 +75,7 @@ def setup_logging() -> None:
                 "()": StructuredFormatter,
             },
             "console": {
+                "class": f"{RedactingFormatter.__module__}.{RedactingFormatter.__qualname__}",
                 "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
                 "datefmt": "%Y-%m-%d %H:%M:%S",
             },
@@ -114,6 +123,9 @@ def setup_logging() -> None:
                 "level": "WARNING",
                 "propagate": False,
             },
+            # HTTP client libraries log full request URLs (YouTube sends ?key=...) at
+            # INFO/DEBUG; keep only their warnings and errors.
+            **{name: {"level": "WARNING"} for name in NOISY_HTTP_LOGGERS},
         },
     }
     logging.config.dictConfig(config)

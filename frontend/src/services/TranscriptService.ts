@@ -127,10 +127,11 @@ class TranscriptService {
     limit: number = 100,
     concurrency: number = 5,
     allowWhisper: boolean = true,
+    outputLanguage: OutputLanguage = 'original',
   ): Promise<ChannelVideoTranscriptSimple[]> {
-    console.log(`[TranscriptService] Fetching channel transcripts: ${handle}`);
+    console.log(`[TranscriptService] Fetching channel transcripts: ${handle} (lang=${outputLanguage})`);
     const resp = await fetch(
-      `${API_BASE}/channel/${encodeURIComponent(handle)}/transcripts?limit=${limit}&concurrency=${concurrency}&allow_whisper=${allowWhisper}`
+      `${API_BASE}/channel/${encodeURIComponent(handle)}/transcripts?limit=${limit}&concurrency=${concurrency}&allow_whisper=${allowWhisper}&output_language=${encodeURIComponent(outputLanguage)}`
     );
     if (!resp.ok) {
       const body = await resp.json().catch(() => null);

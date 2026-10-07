@@ -32,8 +32,12 @@ exceptions are `GET /api/health` (coarse status only) and `POST /api/auth/login|
 
 - Roles: `admin` (operational endpoints such as `/api/metrics`, `/api/quota`,
   `/api/cache/stats`, and every user's jobs) and `user` (only the jobs they created).
-- Only hashes are stored in configuration. Generate entries with
-  `python scripts/hash_secret.py user|apikey|jwt-secret`.
+- Only hashes are stored in configuration. To configure a production `.env` in one step
+  (admin password prompt, generated `JWT_SECRET_KEY`, optional admin API key, explicit
+  `CORS_ORIGINS`, `APP_ENV=production`, backup + validation against the startup checks):
+  `python scripts/configure_env.py --origin https://your.domain [--api-key-name ops]`.
+  Individual entries can be generated with `python scripts/hash_secret.py user|apikey|jwt-secret`.
+  The `.env.backup-*` file it leaves contains the previous secrets; delete it once verified.
 - Removing a user from `AUTH_USERS` revokes their sessions on the next request.
   Rotating `JWT_SECRET_KEY` revokes all sessions.
 - With `APP_ENV=production` the app refuses to start when `JWT_SECRET_KEY` is
