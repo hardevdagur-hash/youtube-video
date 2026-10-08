@@ -9,7 +9,7 @@ import {
 import { Container, Badge, Card } from '../components/ui';
 import VideoUrlInput from '../components/transcript/VideoUrlInput';
 import { transcriptService } from '../services/TranscriptService';
-import { useAuth } from '../auth/AuthContext';
+import { channelWindowLabel, useAuth } from '../auth/AuthContext';
 import type {
   ChannelVideoTranscriptSimple,
   TranscriptJobProgressData,
@@ -551,8 +551,8 @@ export default function Transcript() {
               Video or Channel — Transcript Pipeline
             </h1>
             <p className="text-[17px] leading-relaxed text-white/75 max-w-lg">
-              Extract official closed captions or transcribe speech using GPU-accelerated Whisper
-              with exact duration filtering (3:00 – 30:00).
+              Extract official closed captions, or transcribe the speech with Whisper when a video
+              has none. Channel runs include videos of {channelWindowLabel(limits)}.
             </p>
           </motion.div>
         </div>
@@ -606,7 +606,7 @@ export default function Transcript() {
                       Channel Transcripts Pipeline
                     </h3>
                     <p className="text-sm text-gray-500 dark:text-gray-400">
-                      Enter a channel handle (@handle) to process eligible videos (3–30 min)
+                      Enter a channel handle (@handle) to process eligible videos ({channelWindowLabel(limits)})
                     </p>
                   </div>
                 </div>
@@ -1352,7 +1352,7 @@ export default function Transcript() {
                 {channelVideos.length === 0 && (
                   <Card padding="lg">
                     <p className="text-sm text-gray-400 dark:text-gray-500 text-center py-4">
-                      No eligible videos (3–30 min) found for this channel.
+                      No eligible videos ({channelWindowLabel(limits)}) found for this channel.
                     </p>
                   </Card>
                 )}

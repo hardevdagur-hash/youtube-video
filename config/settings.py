@@ -163,6 +163,12 @@ class Settings:
         self.max_active_jobs: int = _env_int("MAX_ACTIVE_JOBS", 4, 1, 50)
         self.max_active_jobs_per_user: int = _env_int("MAX_ACTIVE_JOBS_PER_USER", 2, 1, 50)
 
+        # Channel processing: which uploads are eligible (min <= duration < max), and how
+        # many uploads discovery may examine to find them (YouTube quota: ~2 units per 50).
+        self.channel_min_video_seconds: int = _env_int("CHANNEL_MIN_VIDEO_SECONDS", 180, 1, 86400)
+        self.channel_max_video_seconds: int = _env_int("CHANNEL_MAX_VIDEO_SECONDS", 1800, 2, 86400)
+        self.channel_discovery_scan_cap: int = _env_int("CHANNEL_DISCOVERY_SCAN_CAP", 1000, 50, 20000)
+
         # Job lifecycle: finished jobs stay on disk this long, then are deleted.
         self.job_retention_days: int = _env_int("JOB_RETENTION_DAYS", 30, 1, 3650)
         # Finished jobs kept in memory for fast polling/download (others are read from disk).
@@ -170,6 +176,8 @@ class Settings:
 
         if self.transcript_rate_limit_cooldown_base > self.transcript_rate_limit_cooldown_max:
             raise ConfigurationError("TRANSCRIPT_COOLDOWN_BASE must not exceed TRANSCRIPT_COOLDOWN_MAX")
+        if self.channel_min_video_seconds >= self.channel_max_video_seconds:
+            raise ConfigurationError("CHANNEL_MIN_VIDEO_SECONDS must be less than CHANNEL_MAX_VIDEO_SECONDS")
         if self.max_active_jobs_per_user > self.max_active_jobs:
             raise ConfigurationError("MAX_ACTIVE_JOBS_PER_USER must not exceed MAX_ACTIVE_JOBS")
 

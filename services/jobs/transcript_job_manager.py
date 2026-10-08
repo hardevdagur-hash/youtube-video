@@ -22,8 +22,8 @@ from pathlib import Path
 from config.settings import settings
 from infrastructure.request_context import job_id_var
 from models.transcript_job import JobStatus, TranscriptJobProgress, TranscriptVideoItem
+from services.channel_discovery import scan_channel_uploads
 from services.csv_safety import safe_csv_row
-from services.duration_filter import evaluate_duration, parse_iso_duration
 from services.public_errors import public_message
 from services.transcript_limiter import transcript_limiter
 
@@ -375,8 +375,8 @@ class TranscriptJobManager:
         self,
         channel_handle: str,
         max_videos: int = 0,
-        min_duration: int = 180,
-        max_duration: int = 1800,
+        min_duration: int | None = None,
+        max_duration: int | None = None,
         force_refresh: bool = False,
         published_after: str | None = None,
         published_before: str | None = None,
@@ -413,8 +413,8 @@ class TranscriptJobManager:
                 progress=progress,
                 clean_handle=clean_handle,
                 max_videos=max_videos,
-                min_duration=min_duration,
-                max_duration=max_duration,
+                min_duration=min_duration if min_duration is not None else settings.channel_min_video_seconds,
+                max_duration=max_duration if max_duration is not None else settings.channel_max_video_seconds,
                 force_refresh=force_refresh,
                 published_after=published_after,
                 published_before=published_before,
@@ -453,8 +453,8 @@ class TranscriptJobManager:
                     progress=job,
                     clean_handle=job.channel_handle.strip().lstrip("@"),
                     max_videos=job.max_videos,
-                    min_duration=180,
-                    max_duration=1800,
+                    min_duration=settings.channel_min_video_seconds,
+                    max_duration=settings.channel_max_video_seconds,
                     force_refresh=False,
                     published_after=job.published_after,
                     published_before=job.published_before,
@@ -531,110 +531,41 @@ class TranscriptJobManager:
 
             playlist_id = await _to_thread(video_svc.get_uploads_playlist_id, channel_id)
 
-            pub_after_dt = parse_date_boundary(published_after or progress.published_after, is_end_of_day=False)
-            pub_before_dt = parse_date_boundary(published_before or progress.published_before, is_end_of_day=True)
+            # max_videos counts eligible videos (see services.channel_discovery).
+            scan = await _to_thread(
+                scan_channel_uploads,
+                video_svc,
+                playlist_id,
+                max_videos if max_videos > 0 else settings.max_videos_per_job,
+                min_seconds=min_duration,
+                max_seconds=max_duration,
+                scan_cap=settings.channel_discovery_scan_cap,
+                published_after=parse_date_boundary(published_after or progress.published_after, is_end_of_day=False),
+                published_before=parse_date_boundary(published_before or progress.published_before, is_end_of_day=True),
+                should_stop=lambda: progress.status == JobStatus.CANCELLED,
+            )
+            if scan.stopped:
+                return
 
-            all_video_ids: list[str] = []
-            metadata_map: dict[str, dict] = {}
-            next_page: str | None = None
-            target_limit = max_videos if max_videos > 0 else 50000
-
-            while len(all_video_ids) < target_limit:
-                if progress.status == JobStatus.CANCELLED:
-                    return
-                page = await _to_thread(video_svc.get_playlist_items, playlist_id, next_page)
-                vids = page.get("video_ids", [])
-                if not vids:
-                    break
-
-                new_vids = [v for v in vids if v and v not in all_video_ids]
-                if not new_vids:
-                    break
-
-                try:
-                    items = await _to_thread(video_svc.get_videos_batch, new_vids)
-                    for item in items:
-                        vid = item.get("id")
-                        if vid:
-                            metadata_map[vid] = item
-                except Exception as exc:
-                    logger.warning("Failed to fetch metadata batch: %s", exc)
-
-                stop_early = False
-                for vid in new_vids:
-                    all_video_ids.append(vid)
-                    # Uploads playlist is reverse chronological. If a video is older than pub_after_dt,
-                    # we can stop further playlist pagination early to save quota and network calls.
-                    if pub_after_dt:
-                        item = metadata_map.get(vid, {})
-                        item_pub_str = item.get("snippet", {}).get("publishedAt", "")
-                        item_pub_dt = parse_published_at(item_pub_str)
-                        if item_pub_dt and item_pub_dt < pub_after_dt:
-                            stop_early = True
-
-                    if len(all_video_ids) >= target_limit:
-                        stop_early = True
-                        break
-
-                if stop_early:
-                    logger.info("Discovery reached date cutoff or video limit (%d discovered). Stopping pagination early.", len(all_video_ids))
-                    break
-
-                next_page = page.get("next_page_token")
-                if not next_page:
-                    break
-
-            progress.total_discovered = len(all_video_ids)
+            progress.total_discovered = len(scan.scanned)
             progress.updated_at = datetime.now(UTC).isoformat()
-
-            eligible_items: list[TranscriptVideoItem] = []
-            skipped_count = 0
-
-            for vid in all_video_ids:
-                item = metadata_map.get(vid, {})
-                snippet = item.get("snippet", {})
-                cd = item.get("contentDetails", {})
-                title = snippet.get("title", "")
-                published_at = snippet.get("publishedAt", "")
-                duration_iso = cd.get("duration", "PT0S")
-                duration_seconds = parse_iso_duration(duration_iso)
-                live_status = snippet.get("liveBroadcastContent", "none")
-
-                # Date boundary filtering
-                item_pub_dt = parse_published_at(published_at)
-                if pub_after_dt and item_pub_dt and item_pub_dt < pub_after_dt:
-                    skipped_count += 1
-                    continue
-                if pub_before_dt and item_pub_dt and item_pub_dt > pub_before_dt:
-                    skipped_count += 1
-                    continue
-
-                filter_res = evaluate_duration(
-                    duration_seconds=duration_seconds,
-                    live_status=live_status,
-                    min_seconds=min_duration,
-                    max_seconds=max_duration,
+            eligible_items = [
+                TranscriptVideoItem(
+                    video_id=v.video_id,
+                    video_url=f"https://www.youtube.com/watch?v={v.video_id}",
+                    channel_id=channel_id,
+                    channel_title=channel_title,
+                    title=v.title,
+                    published_at=v.published_at,
+                    duration_seconds=v.duration_seconds,
+                    duration=v.duration_formatted,
+                    status="pending",
                 )
-
-                if filter_res.is_eligible:
-                    eligible_items.append(
-                        TranscriptVideoItem(
-                            video_id=vid,
-                            video_url=f"https://www.youtube.com/watch?v={vid}",
-                            channel_id=channel_id,
-                            channel_title=channel_title,
-                            title=title,
-                            published_at=published_at,
-                            duration_seconds=filter_res.duration_seconds,
-                            duration=filter_res.duration_formatted,
-                            status="pending",
-                        )
-                    )
-                else:
-                    skipped_count += 1
+                for v in scan.eligible
+            ]
 
             progress.eligible_videos = len(eligible_items)
-            progress.skipped_videos = skipped_count
+            progress.skipped_videos = len(scan.scanned) - len(eligible_items)
             progress.remaining = len(eligible_items)
             progress.videos = eligible_items
             progress.updated_at = datetime.now(UTC).isoformat()
@@ -642,7 +573,7 @@ class TranscriptJobManager:
 
             logger.info(
                 "Job %s discovery complete: channel='%s', discovered=%d, eligible=%d",
-                progress.job_id, channel_title, len(all_video_ids), len(eligible_items),
+                progress.job_id, channel_title, len(scan.scanned), len(eligible_items),
             )
 
             await self._run_job(

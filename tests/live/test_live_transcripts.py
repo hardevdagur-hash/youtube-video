@@ -121,10 +121,11 @@ def test_channel_sync_original(live):
     resp = live.get(f"/api/channel/{HINDI_CHANNEL}/transcripts", params={"limit": 3, "concurrency": 1, "allow_whisper": "false", "output_language": "original"})
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
-    assert data["total_discovered"] >= 1
-    for video in data["videos"]:
-        if video["status"] == "success":
-            assert video["transcript"] == video["raw_transcript"]
+    assert data["eligible_count"] >= 1, "limit counts eligible videos; none found"
+    successes = [v for v in data["videos"] if v["status"] == "success"]
+    assert successes, "no channel video produced a transcript"
+    for video in successes:
+        assert video["transcript"] == video["raw_transcript"]
 
 
 def test_channel_job_lifecycle(live):
@@ -139,10 +140,12 @@ def test_channel_job_lifecycle(live):
             break
         time.sleep(2)
     assert job["status"] == "completed", job.get("error")
-    assert job["total_discovered"] >= 1
-    for video in job["videos"]:
-        if video["status"] == "success":
-            assert video["transcript"] == video["raw_transcript"]
+    assert job["eligible_videos"] == 2, "max_videos counts eligible videos"
+    successes = [v for v in job["videos"] if v["status"] == "success"]
+    assert successes, "no channel video produced a transcript"
+    for video in successes:
+        assert video["transcript"] == video["raw_transcript"]
+        assert _devanagari_ratio(video["transcript"]) > 0.5, "Original Spoken must stay Hindi"
     download = live.get(f"/api/transcript/jobs/{job_id}/download")
     assert download.status_code == 200 and download.headers["content-type"].startswith("text/csv")
 

@@ -303,4 +303,6 @@ def test_me_reports_server_limits(authed_client):
         "max_videos_per_job": settings.max_videos_per_job,
         "max_videos_sync": settings.max_videos_sync_export,
         "max_active_jobs_per_user": settings.max_active_jobs_per_user,
+        "channel_min_video_seconds": settings.channel_min_video_seconds,
+        "channel_max_video_seconds": settings.channel_max_video_seconds,
     }

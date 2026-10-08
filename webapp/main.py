@@ -315,6 +315,8 @@ async def api_auth_me(request: Request):
             "max_videos_per_job": settings.max_videos_per_job,
             "max_videos_sync": settings.max_videos_sync_export,
             "max_active_jobs_per_user": settings.max_active_jobs_per_user,
+            "channel_min_video_seconds": settings.channel_min_video_seconds,
+            "channel_max_video_seconds": settings.channel_max_video_seconds,
         },
     }
 
@@ -691,6 +693,32 @@ def _format_duration(total_seconds: int) -> str:
     return f"{minutes}:{seconds:02d}"
 
 
+def _scan_channel(video_svc, playlist_id: str, limit: int):
+    """Up to ``limit`` eligible uploads (blocking; see services.channel_discovery)."""
+    from services.channel_discovery import scan_channel_uploads
+
+    return scan_channel_uploads(
+        video_svc, playlist_id, limit,
+        min_seconds=settings.channel_min_video_seconds,
+        max_seconds=settings.channel_max_video_seconds,
+        scan_cap=settings.channel_discovery_scan_cap,
+    )
+
+
+def _scan_metadata(scan) -> dict[str, dict]:
+    """Per-video metadata in the shape the synchronous channel routes report."""
+    return {
+        v.video_id: {
+            "title": v.title,
+            "published_at": v.published_at,
+            "duration_seconds": v.duration_seconds,
+            "duration_readable": v.duration_formatted,
+            "live_status": v.live_status,
+        }
+        for v in scan.scanned
+    }
+
+
 # --- Channel Transcript endpoint ---
 
 
@@ -736,14 +764,15 @@ async def api_channel_transcripts(
     allow_whisper: bool = True,
     output_language: str = Query("original", pattern=_OUTPUT_MODE_PATTERN),
 ):
-    """Fetch transcripts for a YouTube channel with duration filtering (3–30 min).
+    """Fetch transcripts for a YouTube channel's newest eligible videos.
 
     Resolves the channel handle, discovers video IDs from the upload playlist,
     fetches video metadata for duration filtering, and fetches transcripts with
     caption-first retrieval and speech-to-text (Whisper) fallback.
 
     Returns channel info, statistics, and per-video results including metadata.
-    Only processes videos with duration 3:00 <= duration < 30:00 (180s <= dur < 1800s).
+    ``limit`` counts eligible videos: CHANNEL_MIN_VIDEO_SECONDS <= duration <
+    CHANNEL_MAX_VIDEO_SECONDS (default 3:00-30:00), no live/upcoming streams.
     """
     rid = current_request_id()
     clean = handle.lstrip("@")
@@ -770,89 +799,18 @@ async def api_channel_transcripts(
         playlist_id = await _to_thread(video_svc.get_uploads_playlist_id, channel_id)
         logger.info("[%s] Upload playlist: %s", rid, playlist_id)
 
-        # Step 3: Paginate playlist for video IDs
-        logger.info("[%s] Stage 3/5: Discovering videos from upload playlist", rid)
-        all_video_ids: list[str] = []
-        next_page: str | None = None
-        pages_fetched = 0
-        while len(all_video_ids) < limit:
-            page = await _to_thread(
-                video_svc.get_playlist_items, playlist_id, next_page,
-            )
-            video_ids = page.get("video_ids", [])
-            for vid in video_ids:
-                if vid and vid not in all_video_ids:
-                    all_video_ids.append(vid)
-                    if len(all_video_ids) >= limit:
-                        break
-            next_page = page.get("next_page_token")
-            pages_fetched += 1
-            logger.info(
-                "[%s]  Playlist page %d: %d videos (total %d so far)",
-                rid, pages_fetched, len(video_ids), len(all_video_ids),
-            )
-            if not next_page:
-                break
-        logger.info("[%s] Stage 3/5 complete: %d videos discovered", rid, len(all_video_ids))
-
-        # Step 4: Fetch video metadata for duration filtering
-        logger.info("[%s] Stage 4/5: Fetching video metadata (durations, titles)", rid)
-        videos_metadata: dict[str, dict] = {}
-        for i in range(0, len(all_video_ids), 50):
-            batch = all_video_ids[i:i + 50]
-            try:
-                metadata_items = await _to_thread(video_svc.get_videos_batch, batch)
-                for item in metadata_items:
-                    vid = item.get("id")
-                    if not vid:
-                        continue
-                    snippet = item.get("snippet", {})
-                    content_details = item.get("contentDetails", {})
-                    duration_iso = content_details.get("duration", "PT0S")
-                    duration_seconds = _parse_iso_duration(duration_iso)
-                    live_status = snippet.get("liveBroadcastContent", "none")
-                    videos_metadata[vid] = {
-                        "title": snippet.get("title", ""),
-                        "published_at": snippet.get("publishedAt", ""),
-                        "duration_seconds": duration_seconds,
-                        "duration_readable": _format_duration(duration_seconds),
-                        "live_status": live_status,
-                    }
-            except Exception as exc:
-                logger.warning("[%s] Failed to fetch metadata batch of %d videos: %s", rid, len(batch), exc)
-
-        # Filter by duration (3:00 <= duration < 30:00) and exclude live streams using evaluate_duration
-        from services.duration_filter import evaluate_duration
-        eligible_videos: list[str] = []
-        short_videos: list[str] = []
-        long_videos: list[str] = []
-        live_videos: list[str] = []
-
-        for vid in all_video_ids:
-            meta = videos_metadata.get(vid, {})
-            duration = meta.get("duration_seconds", 0)
-            live_status = meta.get("live_status", "none")
-
-            filter_res = evaluate_duration(
-                duration_seconds=duration,
-                live_status=live_status,
-                min_seconds=180,
-                max_seconds=1800,
-            )
-            if filter_res.is_eligible:
-                eligible_videos.append(vid)
-            elif filter_res.skip_reason == "LIVE_STREAM":
-                live_videos.append(vid)
-            elif filter_res.skip_reason == "TOO_SHORT":
-                short_videos.append(vid)
-            elif filter_res.skip_reason == "TOO_LONG":
-                long_videos.append(vid)
-            else:
-                short_videos.append(vid)
-
+        # Steps 3-4: page the uploads playlist until `limit` eligible videos are found
+        logger.info("[%s] Stage 3-4/5: Discovering eligible videos from upload playlist", rid)
+        scan = await _to_thread(
+            _scan_channel, video_svc, playlist_id, limit,
+        )
+        all_video_ids = [v.video_id for v in scan.scanned]
+        videos_metadata = _scan_metadata(scan)
+        eligible_videos = [v.video_id for v in scan.eligible]
+        skipped_count = len(scan.scanned) - len(eligible_videos)
         logger.info(
-            "[%s] Stage 4/5 complete: %d eligible (3–30 min), %d short, %d long, %d live",
-            rid, len(eligible_videos), len(short_videos), len(long_videos), len(live_videos),
+            "[%s] Stage 3-4/5 complete: %d scanned, %d eligible, skipped %s",
+            rid, len(all_video_ids), len(eligible_videos), dict(scan.skip_counts()) or "none",
         )
 
         # Step 5: Fetch transcripts in parallel
@@ -1024,7 +982,7 @@ async def api_channel_transcripts(
                 "channel_title": channel_title,
                 "total_discovered": len(all_video_ids),
                 "eligible_count": len(eligible_videos),
-                "skipped_count": len(short_videos) + len(long_videos) + len(live_videos),
+                "skipped_count": skipped_count,
                 "successful_count": successful_count,
                 "caption_count": caption_count,
                 "whisper_count": whisper_count,
@@ -1343,67 +1301,14 @@ async def api_transcript_csv_export(req: TranscriptExportRequest):
             # Get upload playlist
             playlist_id = await _to_thread(video_svc.get_uploads_playlist_id, channel_id)
 
-            # Paginate playlist for video IDs
-            all_video_ids: list[str] = []
-            next_page: str | None = None
-            while len(all_video_ids) < req.max_videos:
-                page = await _to_thread(
-                    video_svc.get_playlist_items, playlist_id, next_page,
-                )
-                video_ids = page.get("video_ids", [])
-                for vid in video_ids:
-                    if vid and vid not in all_video_ids:
-                        all_video_ids.append(vid)
-                        if len(all_video_ids) >= req.max_videos:
-                            break
-                next_page = page.get("next_page_token")
-                if not next_page:
-                    break
-
-            logger.info("[%s] Discovered %d videos for CSV export", rid, len(all_video_ids))
-
-            # Fetch metadata for duration filtering
-            videos_meta: dict[str, dict] = {}
-            for i in range(0, len(all_video_ids), 50):
-                batch = all_video_ids[i:i + 50]
-                try:
-                    items = await _to_thread(video_svc.get_videos_batch, batch)
-                    for item in items:
-                        vid = item.get("id")
-                        if not vid:
-                            continue
-                        snippet = item.get("snippet", {})
-                        content_details = item.get("contentDetails", {})
-                        duration_iso = content_details.get("duration", "PT0S")
-                        duration_seconds = _parse_iso_duration(duration_iso)
-                        live_status = snippet.get("liveBroadcastContent", "none")
-                        videos_meta[vid] = {
-                            "title": snippet.get("title", ""),
-                            "published_at": snippet.get("publishedAt", ""),
-                            "duration_seconds": duration_seconds,
-                            "duration_readable": _format_duration(duration_seconds),
-                            "live_status": live_status,
-                        }
-                except Exception as exc:
-                    logger.warning("[%s] Metadata batch failed for %d videos: %s", rid, len(batch), exc)
-
-            # Filter 3:00 <= duration < 30:00 and exclude live streams using evaluate_duration
-            from services.duration_filter import evaluate_duration
-            eligible: list[str] = []
-            for vid in all_video_ids:
-                meta = videos_meta.get(vid, {})
-                duration = meta.get("duration_seconds", 0)
-                live_status = meta.get("live_status", "none")
-                f_res = evaluate_duration(
-                    duration_seconds=duration,
-                    live_status=live_status,
-                    min_seconds=180,
-                    max_seconds=1800,
-                )
-                if f_res.is_eligible:
-                    eligible.append(vid)
-
-            logger.info("[%s] %d eligible (3–30 min, no live), fetching transcripts...", rid, len(eligible))
+            # Page the uploads playlist until max_videos eligible videos are found
+            scan = await _to_thread(_scan_channel, video_svc, playlist_id, req.max_videos)
+            videos_meta = _scan_metadata(scan)
+            eligible = [v.video_id for v in scan.eligible]
+            logger.info(
+                "[%s] CSV export: %d scanned, %d eligible, skipped %s; fetching transcripts...",
+                rid, len(scan.scanned), len(eligible), dict(scan.skip_counts()) or "none",
+            )
 
             semaphore = asyncio.Semaphore(5)
 

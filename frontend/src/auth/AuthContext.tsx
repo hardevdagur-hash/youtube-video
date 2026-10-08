@@ -21,9 +21,32 @@ export interface ServerLimits {
   maxVideosPerJob: number;
   maxVideosSync: number;
   maxActiveJobsPerUser: number;
+  /** Channel videos are eligible when min <= duration < max (seconds). */
+  channelMinVideoSeconds: number;
+  channelMaxVideoSeconds: number;
 }
 
-export const DEFAULT_LIMITS: ServerLimits = { maxVideosPerJob: 100, maxVideosSync: 25, maxActiveJobsPerUser: 2 };
+export const DEFAULT_LIMITS: ServerLimits = {
+  maxVideosPerJob: 100,
+  maxVideosSync: 25,
+  maxActiveJobsPerUser: 2,
+  channelMinVideoSeconds: 180,
+  channelMaxVideoSeconds: 1800,
+};
+
+/** "3:00" / "1:30:00" style label for a duration in seconds. */
+export function formatDurationLabel(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = String(s % 60).padStart(2, '0');
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
+}
+
+/** Human description of the channel eligibility window, e.g. "3:00 – 30:00". */
+export function channelWindowLabel(limits: ServerLimits): string {
+  return `${formatDurationLabel(limits.channelMinVideoSeconds)} – ${formatDurationLabel(limits.channelMaxVideoSeconds)}`;
+}
 
 type AuthStatus = 'loading' | 'authenticated' | 'anonymous';
 
@@ -73,6 +96,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         maxVideosPerJob: Number(data.limits.max_videos_per_job) || DEFAULT_LIMITS.maxVideosPerJob,
         maxVideosSync: Number(data.limits.max_videos_sync) || DEFAULT_LIMITS.maxVideosSync,
         maxActiveJobsPerUser: Number(data.limits.max_active_jobs_per_user) || DEFAULT_LIMITS.maxActiveJobsPerUser,
+        channelMinVideoSeconds:
+          Number(data.limits.channel_min_video_seconds) || DEFAULT_LIMITS.channelMinVideoSeconds,
+        channelMaxVideoSeconds:
+          Number(data.limits.channel_max_video_seconds) || DEFAULT_LIMITS.channelMaxVideoSeconds,
       });
     }
     return true;
