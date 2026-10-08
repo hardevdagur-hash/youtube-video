@@ -58,6 +58,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Pinned ShellCheck (the runner's apt version changes with the Ubuntu image).
+      - run: pip install "shellcheck-py==0.10.0.1"
       - name: ShellCheck
         run: shellcheck -x -S style scripts/*.sh tests/deployment/*.sh
 

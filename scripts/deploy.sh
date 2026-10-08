@@ -37,8 +37,9 @@ preflight() {
     [ -n "$(env_value GROQ_API_KEY)" ] \
         || log "WARNING: GROQ_API_KEY is empty: speech-to-text fallback and translation are disabled"
 
-    [ -s docker/nginx/certs/fullchain.pem ] && [ -s docker/nginx/certs/privkey.pem ] \
-        || die "TLS certificate missing: run 'scripts/init-tls.sh self-signed <host>' (bootstrap) or 'scripts/init-tls.sh letsencrypt <domain> <email>'"
+    if [ ! -s docker/nginx/certs/fullchain.pem ] || [ ! -s docker/nginx/certs/privkey.pem ]; then
+        die "TLS certificate missing: run 'scripts/init-tls.sh self-signed <host>' (bootstrap) or 'scripts/init-tls.sh letsencrypt <domain> <email>'"
+    fi
 
     local free_kb
     free_kb="$(df -Pk . | awk 'NR==2 {print $4}')"

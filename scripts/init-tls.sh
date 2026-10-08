@@ -64,7 +64,9 @@ case "$cmd" in
         ;;
     letsencrypt)
         domain="${2:-}"; email="${3:-}"
-        [ -n "$domain" ] && [ -n "$email" ] || die "usage: $0 letsencrypt <domain> <email>"
+        if [ -z "$domain" ] || [ -z "$email" ]; then
+            die "usage: $0 letsencrypt <domain> <email>"
+        fi
         [ -n "$(docker compose ps -q nginx 2>/dev/null)" ] \
             || die "start the stack first (scripts/deploy.sh); nginx must serve the HTTP-01 challenge"
         certbot certonly --webroot -w /var/www/acme -d "$domain" -m "$email" \

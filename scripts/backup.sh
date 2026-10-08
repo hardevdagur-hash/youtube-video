@@ -17,7 +17,9 @@ log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
 
 command -v docker >/dev/null || die "docker is not installed"
-[[ "$BACKUP_KEEP" =~ ^[0-9]+$ ]] && [ "$BACKUP_KEEP" -ge 1 ] || die "BACKUP_KEEP must be a positive integer"
+if ! [[ "$BACKUP_KEEP" =~ ^[0-9]+$ ]] || [ "$BACKUP_KEEP" -lt 1 ]; then
+    die "BACKUP_KEEP must be a positive integer"
+fi
 
 umask 077
 mkdir -p "$BACKUP_DIR"

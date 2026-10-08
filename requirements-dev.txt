@@ -4,4 +4,6 @@ pytest>=8.0.0
 pytest-asyncio>=0.23.0
 # Starlette's TestClient transport (plain httpx is deprecated for it)
 httpx2>=2.0.0
-ruff>=0.6.0
+# Pinned to the version in .pre-commit-config.yaml: new ruff releases add rules, which
+# would turn CI red without any code change. Upgrade both together, deliberately.
+ruff==0.6.9
