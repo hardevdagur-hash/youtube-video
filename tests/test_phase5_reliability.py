@@ -175,3 +175,59 @@ async def test_translation_outage_keeps_original_transcripts(env, monkeypatch):
         assert item.status == "success"
         assert item.transcript == item.raw_transcript  # honest fallback, never empty
         assert item.simple_english_transcript == ""
+
+
+# ---------------------------------------------------------------------------
+# Disk failures
+# ---------------------------------------------------------------------------
+
+
+async def test_disk_full_mid_job_keeps_last_good_checkpoint(env, monkeypatch):
+    from pathlib import Path
+
+    real_write_text = Path.write_text
+    disk = {"full": False}
+
+    def write_text(self, *args, **kwargs):
+        if disk["full"] and self.suffix == ".tmp":
+            raise OSError(28, "No space left on device")
+        return real_write_text(self, *args, **kwargs)
+
+    def first_video(video_id, **kwargs):
+        disk["full"] = True  # the disk fills up while the job is running
+        return _ok(f"transcript of {video_id}")
+
+    monkeypatch.setattr(Path, "write_text", write_text)
+    env.behaviour[VIDEOS[0]] = first_video
+    job = await env.manager.start_channel_job("chan", owner="u", output_language="original")
+    job = await _finish(env.manager, job.job_id)
+
+    # The job itself is unaffected; only persistence failed (and was logged).
+    assert job.status == JobStatus.COMPLETED and job.successful == 3
+    on_disk = json.loads((env.dir / f"{job.job_id}.json").read_text(encoding="utf-8"))
+    assert on_disk["job_id"] == job.job_id  # an earlier checkpoint, still valid JSON
+    assert on_disk["status"] != "completed"
+
+    disk["full"] = False  # space freed: the next save persists the final state
+    env.manager._save_checkpoint(job)
+    assert json.loads((env.dir / f"{job.job_id}.json").read_text(encoding="utf-8"))["status"] == "completed"
+
+
+def test_health_is_503_when_job_storage_is_not_writable(auth_config, monkeypatch):
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    import webapp.main as web
+
+    real_write_text = Path.write_text
+
+    def read_only(self, *args, **kwargs):
+        if self.name == ".healthcheck":
+            raise OSError(30, "Read-only file system")
+        return real_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", read_only)
+    resp = TestClient(web.app).get("/api/health")
+    assert resp.status_code == 503
+    assert resp.json()["data"] == {"status": "unhealthy"}  # anonymous callers get no detail

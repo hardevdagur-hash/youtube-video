@@ -280,7 +280,9 @@ class TranscriptJobManager:
             temp.write_text(job.model_dump_json(indent=2), encoding="utf-8")
             temp.replace(target)
         except Exception as exc:
-            logger.warning("Failed to save transcript job checkpoint for %s: %s", job.job_id, exc)
+            # The previous checkpoint is still intact (atomic replace); progress since then
+            # is only in memory until a later save succeeds.
+            logger.error("Failed to save transcript job checkpoint for %s: %s", job.job_id, exc)
 
     def storage_writable(self) -> bool:
         """Cheap readiness probe: the checkpoint directory exists and is writable."""
