@@ -22,6 +22,12 @@ _MAX_OUTPUT_TOKENS = 8000
 # Devanagari output tokenises far less efficiently than English.
 _TOKENS_PER_WORD = {"en": 3, "hi": 6}
 _SENTENCE_END = re.compile(r"(?<=[.!?\u0964])\s+")
+# A part cut off at the output limit (finish_reason=length) is split in half and retried,
+# down to parts of about _MIN_SPLIT_WORDS words, instead of failing the whole transcript.
+_MAX_SPLIT_DEPTH = 3
+_MIN_SPLIT_WORDS = 150
+# Reasoning models spend output tokens on hidden reasoning; rewriting needs little of it.
+_REASONING_MODEL_PREFIXES = ("openai/gpt-oss",)
 
 
 def _split_into_chunks(text: str, max_words: int = _CHUNK_WORDS) -> list[str]:
@@ -80,6 +86,75 @@ class TranslationService:
             from groq import Groq
             self._client = Groq(api_key=self.api_key, timeout=60)
         return self._client
+
+    def _complete(
+        self, client, system_prompt: str, user_content: str, max_tokens: int,
+    ) -> tuple[str, str | None]:
+        """One chat completion; returns ``(content, finish_reason)``."""
+        kwargs: dict[str, Any] = {
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            "model": self.model,
+            "temperature": 0.2,
+            "max_tokens": max_tokens,
+        }
+        if self.model.startswith(_REASONING_MODEL_PREFIXES):
+            kwargs["reasoning_effort"] = "low"
+        chat_completion = client.chat.completions.create(**kwargs)
+        choice = chat_completion.choices[0]
+        return (choice.message.content or "").strip(), getattr(choice, "finish_reason", None)
+
+    def _translate_part(
+        self,
+        client,
+        system_prompt: str,
+        instruction: str,
+        part_note: str,
+        text: str,
+        target_language: str,
+        label: str,
+        depth: int = 0,
+    ) -> str:
+        """Translate one part; a part truncated at the output limit is split and retried.
+
+        Raises ``TranslationError`` rather than ever returning a truncated translation.
+        """
+        max_output_tokens = min(_MAX_OUTPUT_TOKENS, len(text.split()) * _TOKENS_PER_WORD[target_language] + 200)
+        try:
+            content, finish_reason = self._complete(
+                client, system_prompt,
+                f"Convert the following transcript into {instruction}{part_note}:\n\n{text}",
+                max_output_tokens,
+            )
+        except Exception as exc:
+            logger.error("Groq translation failed for %s: %s", label, exc)
+            err_str = str(exc).lower()
+            if "authentication" in err_str or "api_key" in err_str:
+                raise GroqAuthError(f"Groq authentication failed during translation: {exc}") from exc
+            raise TranslationError(f"Translation failed: {exc}", error_code="TRANSLATION_FAILED") from exc
+
+        if finish_reason == "length":
+            word_count = len(text.split())
+            halves = _split_into_chunks(text, max_words=max(1, (word_count + 1) // 2))
+            if depth < _MAX_SPLIT_DEPTH and word_count >= 2 * _MIN_SPLIT_WORDS and len(halves) > 1:
+                logger.warning(
+                    "Translation of %s hit the output limit (%d words); retrying as %d smaller parts",
+                    label, word_count, len(halves),
+                )
+                return "\n\n".join(
+                    self._translate_part(
+                        client, system_prompt, instruction, part_note, half, target_language,
+                        label=f"{label}.{i}", depth=depth + 1,
+                    )
+                    for i, half in enumerate(halves, start=1)
+                )
+        if finish_reason == "length" or not content:
+            # Never return or cache a silently truncated translation.
+            logger.error("Groq translation for %s incomplete (finish_reason=%s)", label, finish_reason)
+            raise TranslationError("Translation was incomplete.", error_code="TRANSLATION_FAILED")
+        return content
 
     def translate(
         self,
@@ -145,38 +220,10 @@ class TranslationService:
         translated_parts: list[str] = []
         for index, chunk in enumerate(chunks, start=1):
             part_note = f" (part {index} of {len(chunks)}; output only this part)" if len(chunks) > 1 else ""
-            max_output_tokens = min(
-                _MAX_OUTPUT_TOKENS, len(chunk.split()) * _TOKENS_PER_WORD[target_language] + 200
-            )
-            try:
-                chat_completion = client.chat.completions.create(
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {
-                            "role": "user",
-                            "content": f"Convert the following transcript into {instruction}{part_note}:\n\n{chunk}",
-                        },
-                    ],
-                    model=self.model,
-                    temperature=0.2,
-                    max_tokens=max_output_tokens,
-                )
-                choice = chat_completion.choices[0]
-                content = (choice.message.content or "").strip()
-            except Exception as exc:
-                logger.error("Groq translation failed for %s (part %d/%d): %s", video_id, index, len(chunks), exc)
-                err_str = str(exc).lower()
-                if "authentication" in err_str or "api_key" in err_str:
-                    raise GroqAuthError(f"Groq authentication failed during translation: {exc}") from exc
-                raise TranslationError(f"Translation failed: {exc}", error_code="TRANSLATION_FAILED") from exc
-            if getattr(choice, "finish_reason", None) == "length" or not content:
-                # Never return or cache a silently truncated translation.
-                logger.error(
-                    "Groq translation for %s part %d/%d incomplete (finish_reason=%s)",
-                    video_id, index, len(chunks), getattr(choice, "finish_reason", None),
-                )
-                raise TranslationError("Translation was incomplete.", error_code="TRANSLATION_FAILED")
-            translated_parts.append(content)
+            translated_parts.append(self._translate_part(
+                client, system_prompt, instruction, part_note, chunk, target_language,
+                label=f"{video_id} part {index}/{len(chunks)}",
+            ))
 
         translated_text = "\n\n".join(translated_parts)
         logger.info(

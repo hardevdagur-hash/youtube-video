@@ -256,8 +256,8 @@ class _FakeCompletions:
         self.calls = []
         self.finish_reason = finish_reason
 
-    def create(self, messages, model, temperature, max_tokens):
-        self.calls.append({"content": messages[1]["content"], "max_tokens": max_tokens})
+    def create(self, messages, model, temperature, max_tokens, **options):
+        self.calls.append({"content": messages[1]["content"], "max_tokens": max_tokens, "model": model, **options})
         text = f"PART{len(self.calls)}"
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text), finish_reason=self.finish_reason)])
 
@@ -278,6 +278,55 @@ def test_long_transcript_translated_in_chunks(tmp_path):
     assert len(completions.calls) == 5
     assert all(call["max_tokens"] <= 8000 for call in completions.calls)
     assert result["transcript"] == "\n\n".join(f"PART{i}" for i in range(1, 6))
+
+
+class _TruncatesLongParts(_FakeCompletions):
+    """Like a model whose output budget only fits parts of up to ``max_words`` words."""
+
+    def __init__(self, max_words):
+        super().__init__()
+        self.max_words = max_words
+
+    def create(self, messages, model, temperature, max_tokens, **options):
+        text = messages[1]["content"].split(":\n\n", 1)[1]
+        reply = super().create(messages, model, temperature, max_tokens, **options)
+        if len(text.split()) > self.max_words:
+            reply.choices[0].finish_reason = "length"
+        else:
+            reply.choices[0].message.content = f"[{text.split()[2]}..{text.split()[-1]}]"
+        return reply
+
+
+def test_truncated_part_is_split_and_retried_in_order(tmp_path):
+    completions = _TruncatesLongParts(max_words=700)
+    text = " ".join(f"Sentence number {i} is here." for i in range(240))  # 1,200 words: one part
+    result = _translator(tmp_path, completions).translate("dQw4w9WgXcQ", text, "en")
+    # One truncated attempt, then two halves that fit, joined in their original order.
+    assert len(completions.calls) == 3
+    assert result["transcript"] == "[0..here.]\n\n[120..here.]"
+    assert completions.calls[1]["content"].endswith("Sentence number 119 is here.")
+
+
+def test_persistently_truncated_translation_fails_and_is_not_cached(tmp_path):
+    from services.translation.service import TranslationError
+
+    completions = _TruncatesLongParts(max_words=10)  # nothing realistic ever fits
+    svc = _translator(tmp_path, completions)
+    with pytest.raises(TranslationError):
+        svc.translate("dQw4w9WgXcQ", " ".join(f"Sentence number {i} is here." for i in range(240)), "en")
+    assert svc.repository.get_translation("dQw4w9WgXcQ", "en:simple") is None
+    assert len(completions.calls) <= 1 + 2 + 4 + 8  # bounded split depth
+
+
+def test_reasoning_models_use_low_reasoning_effort(tmp_path):
+    completions = _FakeCompletions()
+    svc = _translator(tmp_path, completions)
+    svc.model = "openai/gpt-oss-120b"
+    svc.translate("dQw4w9WgXcQ", "Hello there.", "en")
+    assert completions.calls[-1]["reasoning_effort"] == "low"
+    svc.model = "llama-3.3-70b-versatile"
+    svc.translate("aaaaaaaaaaa", "Hello there.", "en")
+    assert "reasoning_effort" not in completions.calls[-1]
 
 
 def test_truncated_translation_is_rejected_and_not_cached(tmp_path):
