@@ -72,12 +72,16 @@ jobs:
       - name: Test configuration (throwaway credentials)
         run: |
           raw_key="ysk_$(openssl rand -hex 24)"
+          other_key="ysk_$(openssl rand -hex 24)"
           echo "::add-mask::$raw_key"
+          echo "::add-mask::$other_key"
           echo "CI_API_KEY=$raw_key" >> "$GITHUB_ENV"
+          echo "CI_OTHER_API_KEY=$other_key" >> "$GITHUB_ENV"
+          hash() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
           {
             echo "APP_ENV=production"
             echo "JWT_SECRET_KEY=$(openssl rand -hex 32)"
-            echo "API_KEYS=ci:user:$(printf '%s' "$raw_key" | sha256sum | cut -d' ' -f1)"
+            echo "API_KEYS=ci:user:$(hash "$raw_key"),ci-other:user:$(hash "$other_key")"
             echo "CORS_ORIGINS=https://ci.example.test"
             echo "YOUTUBE_API_KEY=ci-dummy-youtube-key"
             echo "GROQ_API_KEY="
@@ -90,8 +94,8 @@ jobs:
           pip install pytest httpx
           SMOKE_TEST_URL=https://127.0.0.1 SMOKE_TEST_INSECURE=1 SMOKE_TEST_API_KEY="$CI_API_KEY" \
             pytest -p no:cacheprovider -o addopts="" -m smoke tests/smoke -q
-      - name: Persistence, backup and restore
-        run: API_KEY="$CI_API_KEY" tests/deployment/stack_test.sh
+      - name: Isolation, persistence (restart + down/up), backup, restore, rollback
+        run: API_KEY="$CI_API_KEY" OTHER_API_KEY="$CI_OTHER_API_KEY" tests/deployment/stack_test.sh
       - name: Container logs
         if: always()
         run: docker compose logs --tail 200
