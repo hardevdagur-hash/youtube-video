@@ -2,12 +2,13 @@
 
 import contextlib
 import logging
-import tempfile
 import uuid
 from collections.abc import Generator
 from pathlib import Path
 
 import yt_dlp
+
+from config.settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -21,15 +22,21 @@ class AudioExtractionError(Exception):
         self.error_code = error_code
 
 
+# Disk guard for one download. Audio over Groq's upload limit is chunked later, so the
+# real bound on length is the duration check (STT_MAX_AUDIO_SECONDS) before download.
+MAX_AUDIO_FILE_BYTES = 256 * 1024 * 1024
+
+
 class YouTubeAudioExtractor:
     """Extracts lightweight audio stream from YouTube videos for STT processing."""
 
-    def __init__(self, temp_dir: Path | str | None = None) -> None:
-        if temp_dir:
-            self.temp_dir = Path(temp_dir)
-        else:
-            self.temp_dir = Path(tempfile.gettempdir()) / "youtube_audio_stt"
+    def __init__(self, temp_dir: Path | str | None = None, max_duration_seconds: int | None = None) -> None:
+        settings = get_settings()
+        self.temp_dir = Path(temp_dir) if temp_dir else settings.audio_temp_dir
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.max_duration_seconds = (
+            max_duration_seconds if max_duration_seconds is not None else settings.stt_max_audio_seconds
+        )
 
     def extract_audio(self, video_id: str) -> Path:
         """Download YouTube audio stream directly as an m4a/opus/aac file.
@@ -41,18 +48,18 @@ class YouTubeAudioExtractor:
             Path to downloaded audio file.
 
         Raises:
-            AudioExtractionError: If extraction fails or file is not found.
+            AudioExtractionError: If extraction fails or file is not found; error_code
+                AUDIO_TOO_LONG when the video exceeds ``max_duration_seconds``.
         """
         unique_token = uuid.uuid4().hex[:8]
         file_prefix = f"{video_id}_{unique_token}"
         output_template = str(self.temp_dir / f"{file_prefix}.%(ext)s")
 
-        # Select lightweight audio formats (m4a preferred for Groq Whisper compatibility)
         ydl_opts = {
-            # Speech needs little bandwidth: ~50-70 kbps keeps a 30-minute video near 16 MB,
-            # well under Groq's 25 MB upload limit (webm/opus and m4a are both accepted).
+            # Speech needs little bandwidth: ~50-70 kbps keeps a 45-minute video under Groq's
+            # 25 MB upload limit; longer audio is split into chunks before upload.
             "format": "ba[abr<=72]/wa/ba",
-            "max_filesize": 25 * 1024 * 1024,
+            "max_filesize": MAX_AUDIO_FILE_BYTES,
             "outtmpl": output_template,
             "quiet": True,
             "no_warnings": True,
@@ -65,7 +72,10 @@ class YouTubeAudioExtractor:
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
+                # Metadata first: refuse over-long or live videos before downloading anything.
+                info = ydl.extract_info(url, download=False)
+                self._check_downloadable(video_id, info)
+                info = ydl.process_ie_result(info, download=True)
                 ext = info.get("ext", "m4a")
 
             target_path = self.temp_dir / f"{file_prefix}.{ext}"
@@ -94,6 +104,19 @@ class YouTubeAudioExtractor:
                 f"Audio extraction failed for {video_id}: {exc}",
                 error_code="AUDIO_EXTRACTION_FAILED",
             ) from exc
+
+    def _check_downloadable(self, video_id: str, info: dict) -> None:
+        if info.get("is_live") or info.get("live_status") in ("is_live", "is_upcoming"):
+            raise AudioExtractionError(
+                f"{video_id} is a live or upcoming stream; its audio cannot be transcribed yet.",
+                error_code="AUDIO_EXTRACTION_FAILED",
+            )
+        duration = info.get("duration")
+        if isinstance(duration, int | float) and duration > self.max_duration_seconds:
+            raise AudioExtractionError(
+                f"{video_id} is {duration:.0f}s long; the speech-to-text limit is {self.max_duration_seconds}s.",
+                error_code="AUDIO_TOO_LONG",
+            )
 
     def cleanup(self, audio_path: Path | str | None) -> None:
         """Safely delete temporary audio file."""

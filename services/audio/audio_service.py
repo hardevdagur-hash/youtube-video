@@ -1,16 +1,15 @@
-"""Audio extraction service using yt-dlp.
+"""Audio download for the channel/export speech-to-text pipeline (``WhisperProvider``).
 
-Downloads YouTube audio directly as .m4a without requiring an external ffmpeg binary.
-Ensures temporary audio files are safely cleaned up after transcription.
+Delegates to ``YouTubeAudioExtractor`` so both pipelines share one download policy:
+unique temp file names (no clashes between concurrent jobs), the duration cap checked
+before download, and the persistent ``DATA_DIR/tmp/audio`` directory.
 """
 
 import logging
-import tempfile
 from pathlib import Path
 
-import yt_dlp
-
 from exceptions.transcript_errors import AudioDownloadError
+from services.youtube.audio import AudioExtractionError, YouTubeAudioExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -19,67 +18,23 @@ class AudioService:
     """Service to download YouTube audio streams and manage temporary audio files."""
 
     def __init__(self, temp_dir: Path | str | None = None) -> None:
-        if temp_dir:
-            self.temp_dir = Path(temp_dir)
-        else:
-            self.temp_dir = Path(tempfile.gettempdir()) / "youtube_audio"
-        self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self._extractor = YouTubeAudioExtractor(temp_dir=temp_dir)
+        self.temp_dir = self._extractor.temp_dir
 
     def download_audio(self, video_id: str) -> Path:
-        """Download YouTube audio stream directly as an m4a/opus/aac file.
-
-        Args:
-            video_id: 11-character YouTube video ID.
-
-        Returns:
-            Path to downloaded audio file.
+        """Download the audio stream of ``video_id`` to a unique temporary file.
 
         Raises:
-            AudioDownloadError: If download fails or file is not found.
+            AudioDownloadError: If the download fails or the video is over the length cap
+                (``error_code`` carries the extractor's code, e.g. AUDIO_TOO_LONG).
         """
-        output_template = str(self.temp_dir / f"{video_id}.%(ext)s")
-
-        ydl_opts = {
-            # Speech needs little bandwidth: ~50-70 kbps keeps a 30-minute video near 16 MB,
-            # well under Groq's 25 MB upload limit (webm/opus and m4a are both accepted).
-            "format": "ba[abr<=72]/wa/ba",
-            "max_filesize": 25 * 1024 * 1024,
-            "outtmpl": output_template,
-            "quiet": True,
-            "no_warnings": True,
-            "extract_flat": False,
-        }
-
         try:
-            url = f"https://www.youtube.com/watch?v={video_id}"
-            logger.info("Downloading audio for video %s", video_id)
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                ext = info.get("ext", "m4a")
-
-            target_path = self.temp_dir / f"{video_id}.{ext}"
-            if target_path.is_file() and target_path.stat().st_size > 0:
-                logger.info("Audio downloaded successfully: %s (%d bytes)", target_path.name, target_path.stat().st_size)
-                return target_path
-
-            # Fallback search for any matching file
-            for candidate in self.temp_dir.glob(f"{video_id}.*"):
-                if candidate.is_file() and candidate.stat().st_size > 0:
-                    return candidate
-
-            raise AudioDownloadError(f"Downloaded audio file for {video_id} not found on disk.")
-        except Exception as exc:
-            logger.error("Failed to download audio for %s: %s", video_id, exc)
-            raise AudioDownloadError(f"Audio download failed for video {video_id}: {exc}") from exc
+            return self._extractor.extract_audio(video_id)
+        except AudioExtractionError as exc:
+            error = AudioDownloadError(exc.message)
+            error.error_code = exc.error_code
+            raise error from exc
 
     def cleanup(self, audio_path: Path | str | None) -> None:
-        """Safely delete temporary audio file."""
-        if not audio_path:
-            return
-        try:
-            p = Path(audio_path)
-            if p.is_file():
-                p.unlink()
-                logger.debug("Deleted temporary audio file: %s", p)
-        except Exception as exc:
-            logger.warning("Failed to delete temporary audio file %s: %s", audio_path, exc)
+        """Safely delete a temporary audio file."""
+        self._extractor.cleanup(audio_path)

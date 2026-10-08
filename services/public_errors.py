@@ -37,6 +37,9 @@ _ERRORS: dict[str, PublicError] = {
     "AUDIO_EXTRACTION_FAILED": PublicError(
         502, "Audio could not be extracted from this video for speech-to-text.", True,
     ),
+    "AUDIO_TOO_LONG": PublicError(
+        422, "This video is longer than the maximum length supported for speech-to-text.", False,
+    ),
     "STT_UNAVAILABLE": PublicError(503, "Speech-to-text is not available on this server.", False),
     "STT_RATE_LIMITED": PublicError(429, "The speech-to-text provider is rate limiting requests. Please retry later.", True),
     "STT_TIMEOUT": PublicError(504, "The speech-to-text provider timed out.", True),

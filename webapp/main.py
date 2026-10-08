@@ -31,6 +31,7 @@ import functools
 import io
 import logging
 import re
+import shutil
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -95,6 +96,32 @@ async def _retention_sweeper(manager) -> None:
             logger.exception("Transcript job retention sweep failed")
 
 
+def _clear_stale_audio() -> None:
+    """Delete speech-to-text audio left behind by a crash or kill.
+
+    Runs before the app serves requests; with a single instance nothing can be using
+    these files yet. Failures are logged and never block startup.
+    """
+    audio_dir = settings.audio_temp_dir
+    removed = 0
+    try:
+        entries = list(audio_dir.iterdir()) if audio_dir.is_dir() else []
+    except OSError as exc:
+        logger.warning("Could not list audio temp dir: %s", exc)
+        return
+    for entry in entries:
+        try:
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink(missing_ok=True)
+            removed += 1
+        except OSError as exc:
+            logger.warning("Could not remove stale audio %s: %s", entry.name, exc)
+    if removed:
+        logger.info("Removed %d stale audio file(s) from an earlier run", removed)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     from services.jobs.transcript_job_manager import transcript_job_manager
@@ -103,6 +130,7 @@ async def lifespan(_app: FastAPI):
         "Transcript service starting (env=%s, data_dir=%s, stt_backend=%s)",
         _auth_settings.app_env, settings.data_dir, settings.stt_backend,
     )
+    await _to_thread(_clear_stale_audio)
     # Single instance: anything left "running" on disk was interrupted by a crash or kill.
     await _to_thread(transcript_job_manager.recover_interrupted_jobs)
     await transcript_job_manager.run_retention_cleanup()
@@ -592,7 +620,7 @@ async def api_transcript_unified(request: UnifiedTranscriptRequest):
         logger.error("[%s] Audio extraction failed: %s", rid, exc)
         transcript_metrics.record_groq_fallback(success=False)
         transcript_metrics.record_final_result(success=False)
-        return _transcript_error(rid, "AUDIO_EXTRACTION_FAILED")
+        return _transcript_error(rid, "AUDIO_TOO_LONG" if exc.error_code == "AUDIO_TOO_LONG" else "AUDIO_EXTRACTION_FAILED")
     except GroqAuthError as exc:
         # Server misconfiguration (missing/invalid GROQ_API_KEY). Never 401: that status
         # means "your session is invalid" to the browser client and would log the user out.
@@ -609,7 +637,7 @@ async def api_transcript_unified(request: UnifiedTranscriptRequest):
         logger.error("[%s] Speech-to-text failed (%s): %s", rid, exc.error_code, exc)
         transcript_metrics.record_groq_fallback(success=False)
         transcript_metrics.record_final_result(success=False)
-        code = "AUDIO_EXTRACTION_FAILED" if exc.error_code == "AUDIO_EXTRACTION_FAILED" else "STT_FAILED"
+        code = exc.error_code if exc.error_code in ("AUDIO_EXTRACTION_FAILED", "AUDIO_TOO_LONG") else "STT_FAILED"
         return _transcript_error(rid, code)
     except TranslationError as exc:
         logger.error("[%s] Translation failed: %s", rid, exc)

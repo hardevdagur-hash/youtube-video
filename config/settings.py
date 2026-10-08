@@ -126,6 +126,10 @@ class Settings:
         self.whisper_model: str = _get_env("WHISPER_MODEL", "base")
         self.whisper_device: str = _get_env("WHISPER_DEVICE", "auto")
         self.whisper_compute_type: str = _get_env("WHISPER_COMPUTE_TYPE", "auto")
+        # Longest video sent to speech-to-text (checked before download; bounds Groq spend).
+        self.stt_max_audio_seconds: int = _env_int("STT_MAX_AUDIO_SECONDS", 7200, 60, 86400)
+        # Audio over Groq's upload limit is split into chunks of this length (needs ffmpeg).
+        self.stt_chunk_seconds: int = _env_int("STT_CHUNK_SECONDS", 600, 60, 1800)
 
         # Logging
         self.log_level: str = _env_choice(

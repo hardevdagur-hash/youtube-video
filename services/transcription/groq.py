@@ -1,11 +1,13 @@
 """Groq Whisper Large V3 Speech-to-Text provider."""
 
 import logging
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
 from config.settings import get_settings
+from services.transcription.audio_chunking import AudioChunk, AudioChunkingError, split_audio
 from services.transcription.provider import (
     TranscriptionProvider,
     TranscriptionResult,
@@ -13,6 +15,9 @@ from services.transcription.provider import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Groq rejects uploads over 25 MB; stay a little below it for multipart overhead.
+MAX_UPLOAD_BYTES = 24 * 1024 * 1024
 
 
 class GroqTranscriptionError(Exception):
@@ -84,6 +89,9 @@ class GroqWhisperProvider(TranscriptionProvider):
     ) -> TranscriptionResult:
         """Transcribe an audio file using Groq Whisper Large V3.
 
+        Files within the upload limit are sent as-is; larger files are split into
+        chunks (see ``audio_chunking``) and the results merged.
+
         Args:
             audio_path: Path to local audio file.
             language: Optional language hint (e.g. 'en', 'hi').
@@ -95,9 +103,10 @@ class GroqWhisperProvider(TranscriptionProvider):
             GroqAuthError: If API key is missing or unauthorized.
             GroqRateLimitError: If rate limits are exceeded after retries.
             GroqTimeoutError: If request times out.
-            GroqTranscriptionError: For other transcription failures.
+            GroqTranscriptionError: For other transcription failures, including audio
+                longer than STT_MAX_AUDIO_SECONDS (error_code AUDIO_TOO_LONG).
         """
-        client = self._get_client()
+        self._get_client()  # fail fast on a missing key, before any audio work
 
         if not audio_path.exists() or audio_path.stat().st_size == 0:
             raise GroqTranscriptionError(
@@ -106,14 +115,81 @@ class GroqWhisperProvider(TranscriptionProvider):
                 retryable=False,
             )
 
-        file_size_mb = audio_path.stat().st_size / (1024 * 1024)
-        if file_size_mb > 25.0:
-            raise GroqTranscriptionError(
-                f"Audio file size ({file_size_mb:.1f} MB) exceeds Groq 25 MB limit.",
-                error_code="TRANSCRIPTION_FAILED",
-                retryable=False,
-            )
+        if audio_path.stat().st_size <= MAX_UPLOAD_BYTES:
+            return self._transcribe_file(audio_path, language)
+        return self._transcribe_chunked(audio_path, language)
 
+    def _transcribe_chunked(self, audio_path: Path, language: str | None) -> TranscriptionResult:
+        """Transcribe audio over the upload limit as consecutive chunks, then merge.
+
+        All-or-nothing: if any chunk fails the whole transcription fails, so a partial
+        transcript is never returned as if it were complete.
+        """
+        settings = get_settings()
+        chunk_seconds = int(getattr(settings, "stt_chunk_seconds", 600))
+        max_seconds = int(getattr(settings, "stt_max_audio_seconds", 7200))
+        with tempfile.TemporaryDirectory(prefix=f"{audio_path.stem}_chunks_", dir=audio_path.parent) as tmp:
+            try:
+                chunks = split_audio(audio_path, Path(tmp), chunk_seconds)
+            except AudioChunkingError as exc:
+                raise GroqTranscriptionError(
+                    f"Could not split long audio for transcription: {exc}",
+                    error_code="STT_FAILED",
+                    retryable=False,
+                ) from exc
+            total = chunks[-1].end
+            if total > max_seconds:
+                # Duration was unknown before download; enforce the cap before spending credits.
+                raise GroqTranscriptionError(
+                    f"Audio is {total:.0f}s long; the speech-to-text limit is {max_seconds}s.",
+                    error_code="AUDIO_TOO_LONG",
+                    retryable=False,
+                )
+            logger.info(
+                "Audio %s exceeds the %d MB upload limit; transcribing %d chunk(s)",
+                audio_path.name, MAX_UPLOAD_BYTES // (1024 * 1024), len(chunks),
+            )
+            parts: list[tuple[AudioChunk, TranscriptionResult]] = []
+            for index, chunk in enumerate(chunks, start=1):
+                logger.info("Transcribing chunk %d/%d (%.0fs-%.0fs)", index, len(chunks), chunk.start, chunk.end)
+                parts.append((chunk, self._transcribe_file(chunk.path, language)))
+        return self._merge_chunks(parts)
+
+    @staticmethod
+    def _merge_chunks(parts: list[tuple[AudioChunk, TranscriptionResult]]) -> TranscriptionResult:
+        """Concatenate chunk results with segment times shifted to the original timeline."""
+        segments: list[TranscriptionSegment] = []
+        texts: list[str] = []
+        seconds_by_language: dict[str, float] = {}
+        for chunk, result in parts:
+            if result.text:
+                texts.append(result.text)
+            for seg in result.segments:
+                segments.append(TranscriptionSegment(
+                    start=round(seg.start + chunk.start, 3),
+                    end=round(seg.end + chunk.start, 3),
+                    text=seg.text,
+                    duration=seg.duration,
+                ))
+            if result.text:
+                seconds_by_language[result.language] = (
+                    seconds_by_language.get(result.language, 0.0) + (chunk.end - chunk.start)
+                )
+        # The language spoken for most of the audio (chunks of silence or music do not vote).
+        language = max(seconds_by_language, key=seconds_by_language.__getitem__) if seconds_by_language else "en"
+        return TranscriptionResult(
+            text=" ".join(texts).strip(),
+            segments=segments,
+            language=language,
+            duration=float(parts[-1][0].end) if parts else 0.0,
+            confidence=0.95,
+            provider="groq_whisper_large_v3",
+        )
+
+    def _transcribe_file(self, audio_path: Path, language: str | None) -> TranscriptionResult:
+        """One upload (within the size limit) with retries for transient failures."""
+        client = self._get_client()
+        file_size_mb = audio_path.stat().st_size / (1024 * 1024)
         logger.info(
             "Sending %s (%.2f MB) to Groq %s (lang=%s)",
             audio_path.name,

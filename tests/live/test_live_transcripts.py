@@ -147,6 +147,49 @@ def test_channel_job_lifecycle(live):
     assert download.status_code == 200 and download.headers["content-type"].startswith("text/csv")
 
 
+@pytest.mark.skipif(not _GROQ_KEY, reason="GROQ_API_KEY not configured")
+def test_groq_whisper_single_upload_and_chunked_agree(tmp_path, monkeypatch):
+    """Real audio download + real Groq Whisper, once whole and once forced into chunks.
+
+    Uses the English video: YouTube intermittently answers yt-dlp with a "confirm you're
+    not a bot" challenge for some videos/IPs, which fails this test (by design, loudly).
+    """
+    import services.transcription.groq as groq_module
+    from config.settings import settings
+    from services.transcription.audio_chunking import ffmpeg_path
+    from services.transcription.groq import GroqWhisperProvider
+    from services.youtube.audio import YouTubeAudioExtractor
+
+    if ffmpeg_path() is None:
+        pytest.skip("ffmpeg is not installed")
+    provider = GroqWhisperProvider(api_key=_GROQ_KEY)
+    with YouTubeAudioExtractor(temp_dir=tmp_path).audio_context(ENGLISH_VIDEO) as audio:
+        whole = provider.transcribe(audio)
+        monkeypatch.setattr(groq_module, "MAX_UPLOAD_BYTES", 256 * 1024)  # force the long-video path
+        monkeypatch.setattr(settings, "stt_chunk_seconds", 90)
+        assert audio.stat().st_size > groq_module.MAX_UPLOAD_BYTES
+        chunked = provider.transcribe(audio)
+
+    for result in (whole, chunked):
+        assert result.language == "en"
+        assert len(_LATIN_WORD.findall(result.text)) > 50
+        starts = [s.start for s in result.segments]
+        assert starts == sorted(starts)
+    assert chunked.segments[-1].end > 180  # timestamps run across chunk boundaries (213 s video)
+    whole_words, chunked_words = len(whole.text.split()), len(chunked.text.split())
+    assert abs(whole_words - chunked_words) / whole_words < 0.25
+    assert list(tmp_path.iterdir()) == []  # audio and chunk files cleaned up
+
+
+def test_duration_cap_checked_on_real_metadata_before_download(tmp_path):
+    from services.youtube.audio import AudioExtractionError, YouTubeAudioExtractor
+
+    with pytest.raises(AudioExtractionError) as err:
+        YouTubeAudioExtractor(temp_dir=tmp_path, max_duration_seconds=60).extract_audio(ENGLISH_VIDEO)
+    assert err.value.error_code == "AUDIO_TOO_LONG"
+    assert list(tmp_path.iterdir()) == []  # nothing was downloaded
+
+
 def test_channel_job_cancel(live):
     created = live.post(f"/api/channel/{HINDI_CHANNEL}/transcript-job", json={"max_videos": 5, "output_language": "original"})
     job_id = created.json()["data"]["job_id"]
