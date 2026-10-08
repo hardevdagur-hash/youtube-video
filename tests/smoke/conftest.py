@@ -11,4 +11,4 @@ import pytest
 @pytest.fixture(autouse=True)
 def _fresh_translation_service():
     """No-op: smoke tests never import the application."""
-    yield
+    return
