@@ -15,7 +15,7 @@ public issue). Include the affected endpoint or file, reproduction steps and imp
 | CORS | `cors_options`, `CORS_ORIGINS` | Explicit origins only; `*` refused in production; same-origin needs none |
 | Rate limits | `AuthMiddleware`, nginx `limit_req` | Per user (`API_RATE_LIMIT_PER_MINUTE`, `COSTLY_RATE_LIMIT_PER_MINUTE`), per IP for login and at nginx |
 | Resource caps | `config/settings.py` | `MAX_VIDEOS_PER_JOB`, `MAX_VIDEOS_SYNC_EXPORT`, `MAX_ACTIVE_JOBS[_PER_USER]`, `MAX_CONCURRENT_SYNC_CHANNEL_RUNS` |
-| Input validation | Pydantic models / path patterns | Strict video/job/handle ids, output modes, ISO dates, body ≤ 1 MB (nginx) |
+| Input validation | Pydantic models / path patterns | Strict video/job/handle ids, output modes, ISO dates, body ≤ 64 KiB in the app (`infrastructure/validation.py`; chunked bodies without a length refused) and ≤ 1 MB at nginx |
 | Path safety | `TranscriptRepository._file_for`, `TranscriptJobManager._job_path` | Files only from validated ids, resolved path must stay inside `DATA_DIR` |
 | Error hygiene | `services/public_errors.py`, global handler | Fixed client messages + `trace_id`; details only in server logs |
 | CSV injection | `services/csv_safety.py` | Cells starting with `= + - @` / tab / CR are prefixed with `'` |

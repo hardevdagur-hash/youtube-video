@@ -59,7 +59,26 @@ Never run `docker compose down -v` or `docker volume rm`: that deletes the
 4. `docker compose up -d`; waits for the container health check, then checks
    `https://127.0.0.1/api/health` through nginx.
 5. Success: records the tag in `.deploy/current` (previous in `.deploy/previous`).
-   Failure: prints app logs and starts the previous image again.
+   Failure: prints app logs and starts the previous image again (data is never touched).
+
+After a successful deploy, run the read-only smoke suite from any machine (it only
+reads health/auth/static routes and creates nothing):
+
+```bash
+SMOKE_TEST_URL=https://<domain> SMOKE_TEST_API_KEY=<user key> pytest -o addopts="" -m smoke tests/smoke -q
+```
+
+## Secret rotation
+
+| Secret | How | Effect |
+| --- | --- | --- |
+| `JWT_SECRET_KEY` | `python3 scripts/configure_env.py --rotate-jwt --origin https://<domain>`, then `docker compose up -d app` | All browser sessions end; users sign in again |
+| Admin password | `python3 scripts/configure_env.py --origin https://<domain>` (prompts), then `docker compose up -d app` | Old password stops working; existing sessions of removed users are revoked |
+| API key | `python3 scripts/hash_secret.py` → replace the entry in `API_KEYS`, restart | Old key rejected immediately |
+| `YOUTUBE_API_KEY`, `GROQ_API_KEY` | Create the new key in Google Cloud / Groq console, update `.env`, `docker compose up -d app`, then revoke the old key | See SECURITY.md "Rotating third-party API keys" |
+
+`docker compose up -d app` recreates the container so it reads the new `.env`
+(`restart` does not). Running jobs are checkpointed and come back `paused`.
 
 ## Incidents
 
@@ -70,6 +89,12 @@ Never run `docker compose down -v` or `docker volume rm`: that deletes the
 | Single videos without captions fail with `STT_UNAVAILABLE` | `GROQ_API_KEY` missing/invalid | Fix the key, restart the app |
 | Jobs end `paused` with "persistent YouTube rate limiting" | YouTube throttles this server's IP | Wait (hours), then resume; consider a larger `TRANSCRIPT_REQUEST_INTERVAL` |
 | Many `CAPTIONS_UNAVAILABLE` for videos that have captions | YouTube blocks caption scraping from the host IP | Speech-to-text fallback (Groq) covers it; otherwise run from another egress IP |
+| `AUDIO_EXTRACTION_FAILED`; logs show "Sign in to confirm you're not a bot" | YouTube challenges yt-dlp audio downloads from this IP | Not fixable in the app; retry later or use another egress IP. Captioned videos are unaffected |
+| `AUDIO_TOO_LONG` | Uncaptioned video longer than `STT_MAX_AUDIO_SECONDS` | Expected cost guard; raise the setting only with Groq budget for it |
+| `STT_RATE_LIMITED` on long videos | Groq audio-seconds-per-hour limit (7,200 on the free tier) | Wait an hour or upgrade the Groq plan |
+| Logs show `Login throttled (backoff/ip_rate/user_rate)` | Repeated failed logins | Attacker IPs are slowed, accounts are not locked; if `user_rate` persists, someone is guessing one account from many IPs: consider firewalling |
+| Channel job completes with few/zero videos | Uploads outside `CHANNEL_MIN/MAX_VIDEO_SECONDS` within `CHANNEL_DISCOVERY_SCAN_CAP` | Check the job's `skipped_videos`; adjust the window if the product rule allows |
+| `Failed to save transcript job checkpoint` in logs | Disk full / volume read-only | Free space (`df -h`); the last good checkpoint is intact and the next save catches up |
 | 429 `JOB_LIMIT_REACHED` / `SERVER_BUSY` | Configured limits reached | Expected; raise `MAX_ACTIVE_JOBS*` / `MAX_CONCURRENT_SYNC_CHANNEL_RUNS` only if the host has capacity |
 | nginx does not start | Missing/invalid certificate | `scripts/init-tls.sh self-signed <domain>`; `docker compose logs nginx` |
 | Users logged out after a restart | `JWT_SECRET_KEY` changed | Expected when rotating; keep it stable otherwise |

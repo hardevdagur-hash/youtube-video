@@ -38,8 +38,14 @@ Simple English / Simple Hindi from the Hindi source.
 2. Cache lookup in `DATA_DIR/transcripts/canonical/<video_id>.json`. Concurrent
    requests for the same uncached video wait for one acquisition (striped locks).
 3. YouTube captions (`services/youtube/captions.py`).
-4. No captions → download audio with yt-dlp (≈50–70 kbps, ≤ 25 MB) → Groq Whisper
-   (`services/transcription/groq.py`).
+4. No captions → check the duration from metadata (refuse live streams and videos over
+   `STT_MAX_AUDIO_SECONDS` with `AUDIO_TOO_LONG`, before downloading) → download audio
+   with yt-dlp (≈50–70 kbps, unique file under `DATA_DIR/tmp/audio`,
+   `services/youtube/audio.py`) → Groq Whisper (`services/transcription/groq.py`).
+   Audio over 24 MiB is split by ffmpeg into `STT_CHUNK_SECONDS` mono 16 kHz Opus
+   chunks (`services/transcription/audio_chunking.py`), transcribed in order and merged
+   with timestamps shifted onto the original timeline; one failed chunk fails the whole
+   transcript (never a partial result).
 5. Clean/normalise (`services/transcription/cleaner.py` → `pipeline/`), validate
    quality (`validator.py`), cache.
 6. `en`/`hi`: translate (cached per video and mode).
@@ -53,9 +59,16 @@ Errors map to fixed public codes (`services/public_errors.py`), e.g.
 
 ### Discovery (both channel paths)
 
-YouTube Data API: resolve the handle → uploads playlist → page through video ids →
-fetch metadata in batches of 50 → keep videos of **3–30 minutes that are not live**
-(`services/duration_filter.py`), optionally within `published_after/before`.
+`services/channel_discovery.py` (one implementation for jobs, the synchronous route and
+CSV export). YouTube Data API: resolve the handle → uploads playlist (newest first) →
+for each page of 50 ids fetch metadata and keep videos that are **not live** and within
+`CHANNEL_MIN_VIDEO_SECONDS` ≤ duration < `CHANNEL_MAX_VIDEO_SECONDS` (default 3:00–30:00,
+`services/duration_filter.py`), optionally within `published_after/before`.
+
+Paging continues until `max_videos` *eligible* videos are found, the playlist ends,
+uploads older than `published_after` are reached, or `CHANNEL_DISCOVERY_SCAN_CAP`
+uploads were examined. `total_discovered` is the number examined; `skipped_videos`
+those outside the rules. A failed metadata batch skips only its page.
 
 ### Synchronous: `GET /api/channel/{handle}/transcripts`, `POST /api/transcript/export`
 

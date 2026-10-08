@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [Unreleased] - 2026-10-08
+
+- **Login abuse**: failed logins no longer lock an account for everyone. Per-IP rate,
+  per-(IP, username) exponential backoff (2 s doubling, 15 min cap, cleared on success)
+  and a per-username cross-IP rate (`LOGIN_USER_RATE_LIMIT_PER_MINUTE`).
+- **Request bodies**: API cap 64 KiB; chunked bodies without `Content-Length` refused (411).
+- **Long videos**: audio over Groq's 25 MB limit is chunked with ffmpeg and merged
+  (all-or-nothing); `STT_MAX_AUDIO_SECONDS` (default 2 h) checked before download;
+  new `AUDIO_TOO_LONG` error. Both pipelines share one audio downloader (unique temp
+  files under `DATA_DIR/tmp/audio`, cleaned at startup).
+- **Channels**: `max_videos` now counts eligible videos (previously a channel whose newest
+  uploads were Shorts or long lectures returned nothing); one shared discovery
+  implementation; configurable window `CHANNEL_MIN/MAX_VIDEO_SECONDS` (default unchanged,
+  3:00–30:00) and `CHANNEL_DISCOVERY_SCAN_CAP`; the UI shows the configured window.
+- **Translation**: a part cut off at the model's output limit is split and retried
+  instead of dropping the whole translation; gpt-oss models use `reasoning_effort=low`.
+- **Fixes**: YouTube client read its API key at import time (rotated keys and tests
+  silently used a stale key); lost checkpoints are logged as errors.
+- **Verification**: live tests cover Groq Whisper (single upload vs forced chunks) and
+  require real channel transcripts; stack test covers `down`/`up`, rollback and
+  cross-user isolation through nginx.
+
 ## [v3.0.0] - 2026-10-07
 
 ### Transcript-only, single-instance production release

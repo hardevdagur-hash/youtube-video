@@ -9,8 +9,12 @@ actually spoken or rewritten as Simple English / Simple Hindi, and export them t
   cancel, resume and CSV download.
 - **Output modes**: `original` (Original Spoken: verbatim captions/speech in the
   spoken language, never translated), `en` (Simple English), `hi` (Simple Hindi).
+  `original` works for any spoken language YouTube or Whisper supports; rewriting is
+  offered only into English and Hindi (other targets are rejected with 400/422).
 - **Fallback**: videos without captions are transcribed from their audio with Groq
-  Whisper (`whisper-large-v3`).
+  Whisper (`whisper-large-v3`). Audio over Groq's 25 MB upload limit (roughly 45+
+  minutes) is split into 10-minute chunks with ffmpeg and merged; videos longer than
+  `STT_MAX_AUDIO_SECONDS` (2 h) are refused with `AUDIO_TOO_LONG` before any download.
 
 It is a deliberately small system: one FastAPI process with one worker behind nginx,
 with all state in one directory (`DATA_DIR`). No database, Redis or worker queue.
@@ -95,6 +99,10 @@ each one. The essentials:
 | `CORS_ORIGINS` | no | Only for cross-origin browser clients; never `*` |
 | `DATA_DIR` | no | Persistent data (`./data`; `/app/data` in Docker) |
 | `MAX_VIDEOS_PER_JOB`, `MAX_VIDEOS_SYNC_EXPORT`, `MAX_ACTIVE_JOBS[_PER_USER]` | no | Abuse/cost limits (100, 25, 4/2) |
+| `CHANNEL_MIN_VIDEO_SECONDS`, `CHANNEL_MAX_VIDEO_SECONDS` | no | Channel eligibility window (180, 1800 = 3:00–30:00) |
+| `CHANNEL_DISCOVERY_SCAN_CAP` | no | Uploads examined to find `max_videos` eligible ones (1000; YouTube quota bound) |
+| `STT_MAX_AUDIO_SECONDS`, `STT_CHUNK_SECONDS` | no | Longest video sent to speech-to-text (7200); chunk length (600) |
+| `LOGIN_RATE_LIMIT_PER_MINUTE`, `LOGIN_USER_RATE_LIMIT_PER_MINUTE` | no | Login attempts per IP (5) and per username across IPs (30) |
 | `JOB_RETENTION_DAYS` | no | Finished jobs are deleted after this (30) |
 | `LOG_LEVEL`, `LOG_FORMAT` | no | `INFO`; `text` or `json` (the image uses `json`) |
 
@@ -124,7 +132,8 @@ make check                                     # ruff (read-only) + pytest + fro
 pytest -o log_cli=false -q                     # backend: unit, security, reliability, integration
 RUN_LIVE_TESTS=1 pytest -m live tests/live     # real YouTube/Groq calls (uses .env keys; costs quota)
 SMOKE_TEST_URL=https://host SMOKE_TEST_INSECURE=1 pytest -m smoke tests/smoke   # against a deployment
-API_KEY=<raw key named "ci"> tests/deployment/stack_test.sh                    # restart/backup/restore on a stack
+API_KEY=<raw key named "ci"> OTHER_API_KEY=<another user's key> tests/deployment/stack_test.sh
+                                               # on a running stack: isolation, restart, down/up, backup, restore, rollback
 ```
 
 Tests never touch real data or credentials: they run with a temporary `DATA_DIR` and
@@ -174,12 +183,40 @@ without published app port. Details and key-rotation steps: [SECURITY.md](SECURI
 - **Sequential channel jobs.** Videos are processed one at a time with global pacing
   (`TRANSCRIPT_REQUEST_INTERVAL`) to stay under YouTube's caption rate limits; large
   channels take time and can pause on persistent rate limiting (resume later).
-- **Channel eligibility**: only 3–30 minute, non-live videos are transcribed.
-- **YouTube may block caption fetching** from some server IPs (cloud ranges); videos
-  then fall back to speech-to-text if `GROQ_API_KEY` is set.
+- **Channel eligibility differs from single videos.** Channel runs take only non-live
+  uploads inside `CHANNEL_MIN_VIDEO_SECONDS`–`CHANNEL_MAX_VIDEO_SECONDS` (default
+  3:00–30:00, a product rule); a single-video request has no window, so a 45-minute
+  lecture works on its own but is skipped by a channel run unless the maximum is raised.
+  `max_videos` counts eligible videos; discovery examines at most
+  `CHANNEL_DISCOVERY_SCAN_CAP` uploads to find them.
+- **YouTube may block requests from some server IPs** (cloud ranges). Caption fetching
+  can be rate limited, and audio download for speech-to-text (yt-dlp) can be answered
+  with "Sign in to confirm you're not a bot" (observed intermittently, per video, during
+  verification). Affected videos then fail with `AUDIO_EXTRACTION_FAILED`; there is no
+  cookie-based workaround configured.
 - **Two transcript pipelines.** Single videos and channel jobs use different (but
   equivalent-mode) pipelines and separate caches; output text can differ slightly in
-  cleaning.
-- **Speech-to-text limits**: audio over Groq's 25 MB upload limit is not downloaded, so
-  speech-to-text fails for videos longer than roughly 45–60 minutes.
+  cleaning. Both share the audio download, the duration cap and Groq Whisper.
+- **Speech-to-text cost/limits**: videos longer than `STT_MAX_AUDIO_SECONDS` are refused;
+  Groq's free tier allows 7,200 audio-seconds per hour, so several long videos in a row
+  can hit `STT_RATE_LIMITED`. Chunk boundaries are cut by time, so a word spanning a
+  boundary may be transcribed imperfectly.
+- **Translation of very long transcripts** is done in parts; a part the model cuts off is
+  split and retried, and if it still cannot complete, the original-language transcript
+  is returned clearly labelled (`fallback_to_original` / source language), never a
+  partial translation.
 - The `/api/transcript/metrics` counters are in-memory and reset on restart.
+
+## Troubleshooting
+
+| Symptom | Likely cause / action |
+| --- | --- |
+| App container restarts, log says `Refusing to start` | Unsafe production config (weak `JWT_SECRET_KEY`, `*` or `http://` in `CORS_ORIGINS`, no `AUTH_USERS`/`API_KEYS`); fix `.env`, `scripts/deploy.sh` |
+| `/api/health` 503 | `YOUTUBE_API_KEY` missing/placeholder or `DATA_DIR` not writable (full disk / read-only volume) |
+| Channel lookups fail, log shows `API key not valid` | YouTube key revoked or restricted (check HTTP referrer/IP restrictions in Google Cloud console) |
+| `STT_UNAVAILABLE` | `GROQ_API_KEY` empty or rejected |
+| `AUDIO_EXTRACTION_FAILED` | yt-dlp blocked by YouTube from this IP, video private/region-locked, or live |
+| `AUDIO_TOO_LONG` | Video longer than `STT_MAX_AUDIO_SECONDS` and has no captions |
+| Login returns 429 | Throttled for this IP/username; wait `Retry-After` seconds (other users and IPs are unaffected) |
+| Channel job completes with 0 videos | No uploads in the eligibility window within `CHANNEL_DISCOVERY_SCAN_CAP`; check `skipped_videos`, adjust the window |
+| Job shows `paused` after a restart | Expected: it was running when the app stopped; resume it |
