@@ -234,18 +234,26 @@ def _safe_filename_part(text: str) -> str:
 async def api_auth_login(body: LoginRequest, request: Request):
     ip = _authenticator.client_ip(request)
     username = body.username.strip()
-    if not _authenticator.login_limiter.allow(f"ip:{ip}") or _authenticator.is_locked_out(username):
+    throttle = _authenticator.login_throttle
+    decision = throttle.check(ip, username)
+    if not decision.allowed:
+        logger.warning(
+            "Login throttled (%s) for user=%r from ip=%s; retry after %ds",
+            decision.reason, username[:64], ip, decision.retry_after,
+        )
         return JSONResponse(
             status_code=429,
             content={"success": False, "error": "Too many login attempts. Try again later.", "error_code": "RATE_LIMITED"},
-            headers={"Retry-After": "60"},
+            headers={"Retry-After": str(decision.retry_after)},
         )
     if not _authenticator.origin_allowed(request):
         return JSONResponse(status_code=403, content={"success": False, "error": "Cross-site request rejected.", "error_code": "CSRF_REJECTED"})
     principal = await _to_thread(_authenticator.authenticate_password, username, body.password)
     if principal is None:
-        logger.warning("Failed login for user=%r from ip=%s", username[:64], ip)
+        failures = throttle.record_failure(ip, username)
+        logger.warning("Failed login for user=%r from ip=%s (consecutive failures from this ip: %d)", username[:64], ip, failures)
         return JSONResponse(status_code=401, content={"success": False, "error": "Invalid username or password.", "error_code": "INVALID_CREDENTIALS"})
+    throttle.record_success(ip, username)
     token = _authenticator.issue_session(principal)
     response = JSONResponse(content={"success": True, "user": {"username": principal.subject, "role": principal.role}})
     response.set_cookie(

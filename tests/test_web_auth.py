@@ -132,18 +132,24 @@ def test_wrong_password_rejected_without_detail(auth_config):
     assert unknown.json()["error"] == resp.json()["error"]
 
 
-def test_login_lockout_after_repeated_failures(monkeypatch):
-    config = build_test_auth_settings(login_rate_per_minute=1000, login_max_failures=3)
+def test_failed_logins_throttle_the_attacker_not_the_account(monkeypatch):
+    # The TestClient peer is "testclient"; trusting it lets X-Forwarded-For pick the client IP.
+    config = build_test_auth_settings(login_rate_per_minute=1000, trusted_proxies=frozenset({"testclient"}))
     original = web._authenticator.config
     web._authenticator.configure(config)
     monkeypatch.setattr(web, "_auth_settings", config)
     try:
-        client = _client()
+        attacker, victim = _client(), _client()
+        attacker.headers["X-Forwarded-For"] = "203.0.113.9"
+        victim.headers["X-Forwarded-For"] = "198.51.100.7"
         for _ in range(3):
-            assert client.post("/api/auth/login", json={"username": "alice", "password": "bad"}).status_code == 401
-        # Even the correct password is refused while locked out
-        locked = client.post("/api/auth/login", json={"username": "alice", "password": TEST_USER_PASSWORD})
-        assert locked.status_code == 429
+            assert attacker.post("/api/auth/login", json={"username": "alice", "password": "bad"}).status_code == 401
+        # The attacker is now backed off, even with the right password...
+        throttled = attacker.post("/api/auth/login", json={"username": "alice", "password": TEST_USER_PASSWORD})
+        assert throttled.status_code == 429
+        assert int(throttled.headers["Retry-After"]) >= 1
+        # ...but the account owner, from another address, is not locked out.
+        assert victim.post("/api/auth/login", json={"username": "alice", "password": TEST_USER_PASSWORD}).status_code == 200
     finally:
         web._authenticator.configure(original)
 

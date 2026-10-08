@@ -255,30 +255,90 @@ def test_sync_channel_concurrency_limit_is_ten(auth_config):
 
 
 # ---------------------------------------------------------------------------
-# Login protection: lockout duration
+# Login protection: attacker throttling without account lockout
 # ---------------------------------------------------------------------------
 
 
-def test_login_lockout_lasts_fifteen_minutes(monkeypatch):
+@pytest.fixture
+def frozen_clock(monkeypatch):
+    """Controllable wall clock for the rate limiters and the login throttle."""
     import infrastructure.rate_limiter as rl
+    import security.login_throttle as lt
 
     now = [1_000_000.0]
-    monkeypatch.setattr(rl, "time", SimpleNamespace(time=lambda: now[0]))
-    original = _reconfigure(monkeypatch, login_rate_per_minute=1000)
+    fake = SimpleNamespace(time=lambda: now[0])
+    monkeypatch.setattr(rl, "time", fake)
+    monkeypatch.setattr(lt, "time", fake)
+    return now
+
+
+def _from_ip(ip: str) -> TestClient:
+    client = _client()
+    client.headers["X-Forwarded-For"] = ip  # honoured because "testclient" is a trusted proxy
+    return client
+
+
+_ALICE_GOOD = {"username": "alice", "password": TEST_USER_PASSWORD}
+_ALICE_BAD = {"username": "alice", "password": "bad"}
+
+
+def test_login_backoff_is_progressive_capped_and_per_ip(monkeypatch, frozen_clock):
+    original = _reconfigure(monkeypatch, login_rate_per_minute=1000, trusted_proxies=frozenset({"testclient"}))
     try:
-        assert web._auth_settings.login_max_failures == 10
-        assert web._auth_settings.login_lockout_seconds == 15 * 60
-        client = _client()
-        for _ in range(10):
-            assert client.post("/api/auth/login", json={"username": "alice", "password": "bad"}).status_code == 401
-        good = {"username": "alice", "password": TEST_USER_PASSWORD}
-        assert client.post("/api/auth/login", json=good).status_code == 429
-        now[0] += 15 * 60 - 5  # still inside the window
-        assert client.post("/api/auth/login", json=good).status_code == 429
-        now[0] += 10  # window elapsed
-        assert client.post("/api/auth/login", json=good).status_code == 200
-        # Another account was never locked
-        assert client.post("/api/auth/login", json={"username": "root", "password": TEST_USER_PASSWORD}).status_code == 200
+        assert web._auth_settings.login_free_failures == 3
+        assert web._auth_settings.login_max_backoff_seconds == 15 * 60
+        attacker, owner = _from_ip("203.0.113.9"), _from_ip("198.51.100.7")
+        waits, failures = [], 0
+        while failures < 14:
+            resp = attacker.post("/api/auth/login", json=_ALICE_BAD)
+            if resp.status_code == 429:
+                waits.append(int(resp.headers["Retry-After"]))
+                frozen_clock[0] += waits[-1]  # the attacker waits exactly as told
+                continue
+            assert resp.status_code == 401
+            failures += 1
+            # The account owner can sign in at every point of the attack.
+            assert owner.post("/api/auth/login", json=_ALICE_GOOD).status_code == 200
+        # Three free failures, then the wait doubles per failure up to fifteen minutes.
+        assert waits == [2, 4, 8, 16, 32, 64, 128, 256, 512, 900, 900]
+        # Even the right password is refused to the attacker's address while it waits.
+        assert attacker.post("/api/auth/login", json=_ALICE_GOOD).status_code == 429
+    finally:
+        web._authenticator.configure(original)
+
+
+def test_login_success_clears_backoff(monkeypatch, frozen_clock):
+    original = _reconfigure(monkeypatch, login_rate_per_minute=1000, trusted_proxies=frozenset({"testclient"}))
+    try:
+        user = _from_ip("198.51.100.7")
+        for _ in range(3):
+            assert user.post("/api/auth/login", json=_ALICE_BAD).status_code == 401
+        assert user.post("/api/auth/login", json=_ALICE_GOOD).status_code == 429
+        frozen_clock[0] += 2
+        assert user.post("/api/auth/login", json=_ALICE_GOOD).status_code == 200
+        # History cleared: the next typo does not inherit the earlier backoff.
+        assert user.post("/api/auth/login", json=_ALICE_BAD).status_code == 401
+        assert user.post("/api/auth/login", json=_ALICE_GOOD).status_code == 200
+    finally:
+        web._authenticator.configure(original)
+
+
+def test_distributed_guessing_is_capped_per_username_briefly(monkeypatch, frozen_clock):
+    original = _reconfigure(
+        monkeypatch, login_rate_per_minute=1000, login_user_rate_per_minute=5,
+        trusted_proxies=frozenset({"testclient"}),
+    )
+    try:
+        for i in range(5):  # five different attacker IPs, one guess each
+            assert _from_ip(f"203.0.113.{i + 10}").post("/api/auth/login", json=_ALICE_BAD).status_code == 401
+        sixth = _from_ip("203.0.113.99").post("/api/auth/login", json=_ALICE_BAD)
+        assert sixth.status_code == 429 and sixth.headers["Retry-After"] == "60"
+        # Other accounts are unaffected, and the per-username cap lifts after one minute.
+        assert _from_ip("198.51.100.7").post(
+            "/api/auth/login", json={"username": "root", "password": TEST_USER_PASSWORD},
+        ).status_code == 200
+        frozen_clock[0] += 61
+        assert _from_ip("198.51.100.7").post("/api/auth/login", json=_ALICE_GOOD).status_code == 200
     finally:
         web._authenticator.configure(original)
 
@@ -406,3 +466,73 @@ def test_production_starts_with_safe_config_and_hides_api_docs():
     assert result["redoc"] == 404
     assert result["docs_is_swagger"] is False
     assert result["docs_oauth_redirect"] == 404
+
+
+# ---------------------------------------------------------------------------
+# Resource abuse: request bodies
+# ---------------------------------------------------------------------------
+
+
+def test_oversized_body_rejected_before_parsing(authed_client):
+    from infrastructure.validation import MAX_BODY_SIZE
+
+    body = b'{"video_url": "' + b"a" * MAX_BODY_SIZE + b'"}'
+    resp = authed_client.post("/api/transcript", content=body, headers={"Content-Type": "application/json"})
+    assert resp.status_code == 413
+
+
+def test_chunked_body_without_length_rejected(authed_client):
+    def chunks():
+        yield b'{"video_url": "'
+        yield b"a" * 1024
+        yield b'"}'
+
+    resp = authed_client.post("/api/transcript", content=chunks(), headers={"Content-Type": "application/json"})
+    assert resp.status_code == 411
+
+
+# ---------------------------------------------------------------------------
+# CORS: real preflights through Starlette's CORSMiddleware with our options
+# ---------------------------------------------------------------------------
+
+
+def _cors_app(origins: list[str]) -> TestClient:
+    from starlette.applications import Starlette
+    from starlette.middleware import Middleware
+    from starlette.middleware.cors import CORSMiddleware
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Route
+
+    from security.web_auth import cors_options
+
+    options = cors_options(build_test_auth_settings(app_env="production", cors_origins=origins))
+    app = Starlette(
+        routes=[Route("/api/transcript", lambda _r: PlainTextResponse("ok"), methods=["POST"])],
+        middleware=[Middleware(CORSMiddleware, **options)],
+    )
+    return TestClient(app)
+
+
+def _preflight(client: TestClient, origin: str):
+    return client.options("/api/transcript", headers={
+        "Origin": origin, "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "content-type",
+    })
+
+
+def test_cors_preflight_approved_origin_allowed():
+    resp = _preflight(_cors_app(["https://app.example.com"]), "https://app.example.com")
+    assert resp.status_code == 200
+    assert resp.headers["access-control-allow-origin"] == "https://app.example.com"
+    assert resp.headers["access-control-allow-credentials"] == "true"
+
+
+@pytest.mark.parametrize("origin", ["https://evil.example", "null", "https://app.example.com.evil.example", "http://app.example.com"])
+def test_cors_preflight_unapproved_origin_refused(origin):
+    resp = _preflight(_cors_app(["https://app.example.com"]), origin)
+    assert resp.status_code == 400
+    assert "access-control-allow-origin" not in resp.headers
+
+
+def test_cors_simple_request_from_unapproved_origin_gets_no_cors_headers():
+    resp = _cors_app(["https://app.example.com"]).post("/api/transcript", headers={"Origin": "https://evil.example"})
+    assert "access-control-allow-origin" not in resp.headers

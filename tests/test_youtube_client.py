@@ -48,6 +48,12 @@ class TestYouTubeClientInit:
         client = YouTubeClient()
         assert client._api_key is not None  # from settings
 
+    def test_default_key_is_read_at_construction_not_import(self, monkeypatch):
+        from config.settings import settings
+
+        monkeypatch.setattr(settings, "youtube_api_key", "rotated-key")
+        assert YouTubeClient()._api_key == "rotated-key"
+
     def test_init_with_custom_key(self):
         client = YouTubeClient(api_key="test-key-123")
         assert client._api_key == "test-key-123"

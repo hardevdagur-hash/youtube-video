@@ -125,8 +125,10 @@ class YouTubeClient:
       - Comprehensive logging before/after each request
     """
 
-    def __init__(self, api_key: str = settings.youtube_api_key) -> None:
-        self._api_key = api_key
+    def __init__(self, api_key: str | None = None) -> None:
+        # Resolve the key at construction time, not import time: a default argument
+        # would freeze whatever key existed when this module was first imported.
+        self._api_key = api_key if api_key is not None else settings.youtube_api_key
         self._service: Resource | None = None
         self._http: httplib2.Http | None = None
 

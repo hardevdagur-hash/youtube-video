@@ -41,6 +41,7 @@ from starlette.responses import JSONResponse, Response
 from infrastructure.rate_limiter import SlidingWindowRateLimiter
 from infrastructure.request_context import user_var
 from security.jwt_service import JWTConfig, JWTService
+from security.login_throttle import LoginThrottle
 from security.security_models import SecurityError
 
 logger = logging.getLogger("security.web_auth")
@@ -167,9 +168,11 @@ class AuthSettings:
     trusted_proxies: frozenset[str] = frozenset()
     api_rate_per_minute: int = 300
     costly_rate_per_minute: int = 20
-    login_rate_per_minute: int = 5
-    login_max_failures: int = 10
-    login_lockout_seconds: int = 900
+    login_rate_per_minute: int = 5  # per client IP
+    login_user_rate_per_minute: int = 30  # per username across all IPs
+    login_free_failures: int = 3  # per (IP, username) before backoff starts
+    login_backoff_base_seconds: float = 2.0
+    login_max_backoff_seconds: int = 900
 
     @property
     def is_production(self) -> bool:
@@ -211,6 +214,7 @@ class AuthSettings:
             api_rate_per_minute=_int(env, "API_RATE_LIMIT_PER_MINUTE", 300, 1, 100_000),
             costly_rate_per_minute=_int(env, "COSTLY_RATE_LIMIT_PER_MINUTE", 20, 1, 10_000),
             login_rate_per_minute=_int(env, "LOGIN_RATE_LIMIT_PER_MINUTE", 5, 1, 1_000),
+            login_user_rate_per_minute=_int(env, "LOGIN_USER_RATE_LIMIT_PER_MINUTE", 30, 1, 10_000),
         )
 
     def problems(self) -> list[str]:
@@ -314,9 +318,12 @@ class WebAuthenticator:
         ))
         self.api_limiter = SlidingWindowRateLimiter(config.api_rate_per_minute, 60.0)
         self.costly_limiter = SlidingWindowRateLimiter(config.costly_rate_per_minute, 60.0)
-        self.login_limiter = SlidingWindowRateLimiter(config.login_rate_per_minute, 60.0)
-        self.login_failures = SlidingWindowRateLimiter(
-            config.login_max_failures, float(config.login_lockout_seconds),
+        self.login_throttle = LoginThrottle(
+            ip_per_minute=config.login_rate_per_minute,
+            user_per_minute=config.login_user_rate_per_minute,
+            free_failures=config.login_free_failures,
+            backoff_base_seconds=config.login_backoff_base_seconds,
+            max_backoff_seconds=config.login_max_backoff_seconds,
         )
 
     # -- API keys -----------------------------------------------------------
@@ -333,15 +340,12 @@ class WebAuthenticator:
 
     # -- Passwords and sessions --------------------------------------------
 
-    def is_locked_out(self, username: str) -> bool:
-        return self.login_failures.remaining(f"user:{username.lower()}") == 0
-
     def authenticate_password(self, username: str, password: str) -> Principal | None:
+        """Verify a password (constant work for unknown users). Throttling is the caller's job."""
         record = self.config.users.get(username)
         encoded = record[1] if record else _DUMMY_PASSWORD_HASH
         valid = verify_password(password, encoded) and record is not None
         if not valid:
-            self.login_failures.allow(f"user:{username.lower()}")
             return None
         return Principal(subject=username, role=record[0], auth_method="session")
 

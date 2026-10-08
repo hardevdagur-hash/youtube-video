@@ -61,7 +61,11 @@ the loopback interface. When a real domain exists, re-run
 `python scripts/configure_env.py --origin https://<real-domain>` (production is the default
 mode); it replaces `CORS_ORIGINS` and refuses `*` or `http://` origins.
 - Rate limits are per principal (`API_RATE_LIMIT_PER_MINUTE`, `COSTLY_RATE_LIMIT_PER_MINUTE`)
-  and per IP for login. Repeated failed logins lock that username for 15 minutes.
+  and, for login, per client IP (`LOGIN_RATE_LIMIT_PER_MINUTE`) and per username across all
+  IPs (`LOGIN_USER_RATE_LIMIT_PER_MINUTE`). Failed logins never lock an account for everyone:
+  after 3 failures from one IP for one username, that IP must wait 2 s, 4 s, 8 s, ... (capped at
+  15 minutes) before trying that username again, while the owner can still sign in from their
+  own address. A successful login clears the backoff (`security/login_throttle.py`).
   The limits are held in process memory, which is correct for the supported single-instance,
   single-worker deployment (do not scale out without moving them to a shared store).
 

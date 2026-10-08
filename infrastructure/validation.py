@@ -14,7 +14,8 @@ from models.api_response import error_response
 
 logger = logging.getLogger("infrastructure.validation")
 
-MAX_BODY_SIZE = 10 * 1024 * 1024  # 10 MB
+# API bodies are small JSON documents (a URL, a channel handle, a few options).
+MAX_BODY_SIZE = 64 * 1024
 MAX_URL_LENGTH = 2048
 
 YOUTUBE_URL_PATTERN = re.compile(
@@ -42,6 +43,13 @@ class RequestValidationMiddleware(BaseHTTPMiddleware):
 
             if request.method in ("POST", "PUT", "PATCH"):
                 raw_length = request.headers.get("content-length")
+                if raw_length is None and "transfer-encoding" in request.headers:
+                    # A chunked body has no declared size, so the cap below could not apply.
+                    return error_response(
+                        message="Content-Length required",
+                        status_code=411,
+                        request_id=rid,
+                    )
                 try:
                     content_length = int(raw_length) if raw_length else 0
                 except ValueError:
