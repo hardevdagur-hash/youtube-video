@@ -48,6 +48,23 @@ def test_transcript_api_requires_authentication(client):
     assert resp.json()["error_code"] == "UNAUTHENTICATED"
 
 
+def test_sign_in_methods_are_public(client):
+    resp = client.get("/api/auth/providers")
+    assert resp.status_code == 200
+    providers = resp.json()["providers"]
+    assert set(providers) == {"password", "google"}
+    assert all(isinstance(v, bool) for v in providers.values())
+
+
+def test_google_callback_without_valid_state_is_refused(client):
+    resp = client.get(
+        "/api/auth/google/callback", params={"code": "forged", "state": "A" * 43}, follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/transcript?auth_error=")  # unavailable or failed
+    assert "session=" not in resp.headers.get("set-cookie", "")
+
+
 def test_unknown_api_route_is_not_the_spa(client):
     resp = client.get("/api/does-not-exist")
     assert resp.status_code in (401, 404)

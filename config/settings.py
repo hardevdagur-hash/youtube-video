@@ -131,6 +131,19 @@ class Settings:
         # Audio over Groq's upload limit is split into chunks of this length (needs ffmpeg).
         self.stt_chunk_seconds: int = _env_int("STT_CHUNK_SECONDS", 600, 60, 1800)
 
+        # YouTube often blocks audio downloads and caption requests from datacenter IPs.
+        # Optional mitigations (never logged): an egress proxy for YouTube traffic and a
+        # Netscape-format cookies file for yt-dlp.
+        self.youtube_proxy_url: str = _get_env("YOUTUBE_PROXY_URL", "")
+        if self.youtube_proxy_url and not self.youtube_proxy_url.lower().startswith(
+            ("http://", "https://", "socks5://", "socks5h://")
+        ):
+            raise ConfigurationError("YOUTUBE_PROXY_URL must be an http(s):// or socks5(h):// URL")
+        cookies = _get_env("YTDLP_COOKIES_FILE", "")
+        self.ytdlp_cookies_file: Path | None = _env_path("YTDLP_COOKIES_FILE", BASE_DIR) if cookies else None
+        if self.ytdlp_cookies_file is not None and not self.ytdlp_cookies_file.is_file():
+            raise ConfigurationError("YTDLP_COOKIES_FILE does not point to a readable file")
+
         # Logging
         self.log_level: str = _env_choice(
             "LOG_LEVEL", "INFO", ("debug", "info", "warning", "error", "critical")
@@ -148,7 +161,12 @@ class Settings:
 
         # YouTube caption pacing and rate-limit handling (per instance)
         self.transcript_max_concurrency: int = _env_int("TRANSCRIPT_MAX_CONCURRENCY", 1, 1, 10)
+        # Speech-to-text runs (audio download + Groq/Whisper) at once, process-wide.
         self.whisper_max_concurrency: int = _env_int("WHISPER_MAX_CONCURRENCY", 1, 1, 10)
+        # How long a request waits for a free speech-to-text slot before failing (retryable).
+        self.stt_queue_timeout_seconds: int = _env_int("STT_QUEUE_TIMEOUT_SECONDS", 900, 10, 7200)
+        # Dedicated threads for long transcript work, so it never starves sign-in or health.
+        self.transcript_worker_threads: int = _env_int("TRANSCRIPT_WORKER_THREADS", 8, 2, 64)
         self.transcript_request_interval: float = _env_float("TRANSCRIPT_REQUEST_INTERVAL", 2.5, 0.0, 60.0)
         self.transcript_rate_limit_cooldown_base: float = _env_float("TRANSCRIPT_COOLDOWN_BASE", 30.0, 1.0, 3600.0)
         self.transcript_rate_limit_cooldown_max: float = _env_float("TRANSCRIPT_COOLDOWN_MAX", 300.0, 1.0, 86400.0)

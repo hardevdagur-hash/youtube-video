@@ -3,8 +3,8 @@
 Injects a custom requests.Session with:
   - certifi CA bundle
   - SSL / 5xx retry with exponential backoff
-  - Comprehensive request logging
-  - Explicit timeouts
+  - A default (connect, read) timeout on every request (``TimeoutSession``)
+  - An optional egress proxy (YOUTUBE_PROXY_URL)
 
 Smart transcript selection strategy:
   1. Enumerate ALL available transcripts via list_transcripts()
@@ -21,8 +21,6 @@ Smart transcript selection strategy:
 """
 
 import logging
-import time
-import uuid
 from typing import Any
 
 import certifi
@@ -53,6 +51,33 @@ class YouTubeTranscriptClientError(Exception):
 
 class NoTranscriptFoundError(YouTubeTranscriptClientError):
     """No transcript found for this video."""
+
+
+class CaptionRequestFailedError(NoTranscriptFoundError):
+    """Captions could not be fetched (network, TLS, IP block...): says nothing about whether
+    the video has captions, so it must not be cached as "no captions"."""
+
+
+# youtube-transcript-api errors that mean the request failed, not that the video lacks captions.
+_REQUEST_FAILURE_NAMES = frozenset({"YouTubeRequestFailed", "RequestBlocked", "IpBlocked"})
+
+
+def is_request_failure(exc: BaseException) -> bool:
+    """True if ``exc`` (or anything in its cause chain) is a network/TLS/HTTP failure.
+
+    Other library errors (age-restricted, unplayable, invalid id...) are facts about the
+    video and keep their "no transcript" meaning.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, requests.exceptions.RequestException | TranscriptSslError | TimeoutError | ConnectionError):
+            return True
+        if type(current).__name__ in _REQUEST_FAILURE_NAMES:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 class TranscriptsDisabledError(YouTubeTranscriptClientError):
@@ -96,9 +121,38 @@ def _log_transcript_candidate(t, verdict: str, reason: str) -> None:
     )
 
 
-def _build_transcript_session() -> requests.Session:
-    """Build a requests.Session configured for youtube-transcript-api."""
-    session = requests.Session()
+# (connect, read) seconds for every caption request. youtube-transcript-api passes no
+# timeout itself, so without this a stalled connection would hang a worker thread forever.
+DEFAULT_TIMEOUT: tuple[float, float] = (10.0, 30.0)
+
+
+class TimeoutSession(requests.Session):
+    """requests.Session that applies ``DEFAULT_TIMEOUT`` unless a call sets its own, and
+    reports TLS failures as ``TranscriptSslError``."""
+
+    def __init__(self, timeout: tuple[float, float] = DEFAULT_TIMEOUT) -> None:
+        super().__init__()
+        self.default_timeout = timeout
+
+    def request(self, method: str, url: str, *args: Any, **kwargs: Any) -> requests.Response:  # type: ignore[override]
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = self.default_timeout
+        try:
+            return super().request(method, url, *args, **kwargs)
+        except requests.exceptions.SSLError as exc:
+            logger.error("TLS error on %s %s: %s", method.upper(), url.split("?", 1)[0], exc)
+            raise TranscriptSslError(
+                "Unable to connect securely to the transcript service. "
+                "Please try again in a few moments."
+            ) from exc
+
+
+def _build_transcript_session(proxy_url: str = "") -> requests.Session:
+    """Build the requests session injected into youtube-transcript-api."""
+    session = TimeoutSession()
+    if proxy_url:
+        # Optional egress proxy for YouTube (YOUTUBE_PROXY_URL); never logged.
+        session.proxies = {"http": proxy_url, "https": proxy_url}
 
     retry_strategy = Retry(
         total=2,
@@ -132,76 +186,6 @@ def _build_transcript_session() -> requests.Session:
     return session
 
 
-class LoggingSession(requests.Session):
-    """A requests.Session that logs every request and response."""
-
-    def request(  # type: ignore[override]
-        self,
-        method: str,
-        url: str,
-        *args: Any,
-        **kwargs: Any,
-    ) -> requests.Response:
-        request_id = uuid.uuid4().hex[:8]
-        timeout = kwargs.get("timeout", (15, 30))
-
-        _redact = {"authorization", "x-api-key", "api-key", "cookie", "set-cookie"}
-        log_headers = {
-            k: "***" if k.lower() in _redact else str(v)
-            for k, v in kwargs.get("headers", {}).items()
-        }
-        body = kwargs.get("json") or kwargs.get("data")
-        if body is not None:
-            body = str(body)[:300]
-
-        logger.info(
-            "[%s] >>> %s %s  timeout=%s  headers=%s  body=%s",
-            request_id, method.upper(), url, timeout,
-            log_headers or "-", body or "-",
-        )
-
-        start = time.time()
-        try:
-            response = super().request(method, url, *args, timeout=timeout, **kwargs)
-            elapsed = round(time.time() - start, 3)
-            logger.info(
-                "[%s] <<< %s %s  status=%d  elapsed=%.3fs",
-                request_id, method.upper(), url, response.status_code, elapsed,
-            )
-            return response
-        except requests.exceptions.SSLError as exc:
-            elapsed = round(time.time() - start, 3)
-            logger.error(
-                "[%s] SSL ERROR %s %s  elapsed=%.3fs  error=%s",
-                request_id, method.upper(), url, elapsed, exc,
-            )
-            raise TranscriptSslError(
-                "Unable to connect securely to the transcript service. "
-                "Please try again in a few moments."
-            ) from exc
-        except requests.exceptions.ConnectionError as exc:
-            elapsed = round(time.time() - start, 3)
-            logger.error(
-                "[%s] CONNECTION ERROR %s %s  elapsed=%.3fs  error=%s",
-                request_id, method.upper(), url, elapsed, exc,
-            )
-            raise
-        except requests.exceptions.Timeout as exc:
-            elapsed = round(time.time() - start, 3)
-            logger.error(
-                "[%s] TIMEOUT %s %s  elapsed=%.3fs  error=%s",
-                request_id, method.upper(), url, elapsed, exc,
-            )
-            raise
-        except Exception:
-            elapsed = round(time.time() - start, 3)
-            logger.exception(
-                "[%s] REQUEST FAILED %s %s  elapsed=%.3fs",
-                request_id, method.upper(), url, elapsed,
-            )
-            raise
-
-
 class YouTubeTranscriptClient:
     """Client for fetching YouTube video transcripts.
 
@@ -219,7 +203,9 @@ class YouTubeTranscriptClient:
                 "youtube-transcript-api is required. "
                 "Install with: pip install youtube-transcript-api"
             )
-        session = _build_transcript_session()
+        from config.settings import settings
+
+        session = _build_transcript_session(settings.youtube_proxy_url)
         self._session = session
         self._api = YouTubeTranscriptApi(http_client=session)
 

@@ -6,13 +6,14 @@
 # Steps: verify checksum and archive contents -> safety backup of the current data
 # -> stop the app -> replace the volume contents -> start the app -> verify.
 # Restoring replaces ALL current jobs and cached transcripts.
+#
+# The app is started again with the deployed version recorded in .deploy/current, never
+# with whatever image happens to be tagged otherwise.
 set -Eeuo pipefail
 
 cd "$(dirname "$0")/.."
-HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"
-
-log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
-die() { log "ERROR: $*" >&2; exit 1; }
+# shellcheck source=scripts/lib/common.sh
+. scripts/lib/common.sh
 
 archive="${1:-}"
 assume_yes="${2:-}"
@@ -35,6 +36,11 @@ fi
 expected_jobs="$(grep -c '^\./transcript_jobs/[0-9a-f]\{12\}\.json$' <<< "$listing" || true)"
 log "Archive contains ${expected_jobs} job checkpoint(s)"
 
+tag="$(deployed_tag)" \
+    || die "no deployed version recorded in ${STATE_DIR}/current (or its image is gone); deploy once (scripts/deploy.sh) before restoring"
+image="transcript-app:${tag}"
+log "Deployed version: ${image}"
+
 if [ "$assume_yes" != "--yes" ]; then
     read -r -p "This replaces all current transcript data. Type RESTORE to continue: " answer
     [ "$answer" = "RESTORE" ] || die "aborted"
@@ -45,7 +51,6 @@ scripts/backup.sh || die "safety backup failed; nothing was changed"
 
 cid="$(docker compose ps -aq app)"
 [ -n "$cid" ] || die "no app container found; deploy once (scripts/deploy.sh) before restoring"
-image="$(docker inspect -f '{{.Config.Image}}' "$cid")"
 volume="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Name}}{{end}}{{end}}' "$cid")"
 [ -n "$volume" ] || die "could not determine the data volume of the app container"
 
@@ -57,20 +62,10 @@ docker run --rm -i --network none -v "${volume}:/app/data" --entrypoint sh "$ima
     'find /app/data -mindepth 1 -delete && tar -xzf - -C /app/data' < "$archive" \
     || die "restore failed; the safety backup can be restored the same way"
 
-log "Starting the app"
-docker compose up -d app
+log "Starting the app (${image})"
+IMAGE_TAG="$tag" docker compose up -d app
 
-cid="$(docker compose ps -q app)"
-waited=0
-status=""
-while [ "$waited" -lt "$HEALTH_TIMEOUT" ]; do
-    status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$cid" 2>/dev/null || true)"
-    [ "$status" = "healthy" ] && break
-    [ "$status" = "unhealthy" ] && break
-    sleep 3
-    waited=$((waited + 3))
-done
-[ "$status" = "healthy" ] || die "app is not healthy after restore (status: ${status:-unknown}); check 'docker compose logs app'"
+wait_app_healthy || die "app is not healthy after restore; check 'docker compose logs app'"
 
 restored_jobs="$(docker compose exec -T app sh -c 'ls /app/data/transcript_jobs 2>/dev/null | grep -c "^[0-9a-f]\{12\}\.json$" || true')"
 [ "$restored_jobs" = "$expected_jobs" ] \

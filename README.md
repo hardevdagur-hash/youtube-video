@@ -39,6 +39,7 @@ Internet ──► nginx (TLS, HTTP→HTTPS, security headers, per-IP flood limi
          DATA_DIR (Docker volume transcript_data → /app/data)
            transcripts/      transcript + translation cache (JSON per video)
            transcript_jobs/  job checkpoints (JSON per job)  ← the source of truth for jobs
+           users/            Google sign-in accounts (google_users.json, keyed by Google sub)
            tmp/audio/        short-lived audio downloads
 ```
 
@@ -63,13 +64,15 @@ worker**: a second worker would not see the first one's running jobs. See
 
 ## API
 
-All `/api/*` routes require authentication except `GET /api/health` and
-`POST /api/auth/login|logout`. Send a session cookie (browser) or `X-API-Key`.
+All `/api/*` routes require authentication except `GET /api/health`,
+`POST /api/auth/login|logout` and the Google sign-in routes below. Send a session cookie
+(browser; obtained with a password or with Google) or `X-API-Key`.
 
 | Method & path | Purpose |
 | --- | --- |
 | `GET /api/health` | Health: 200 `ok` or 503 `unhealthy` (signed-in callers get details) |
 | `POST /api/auth/login` / `logout`, `GET /api/auth/me` | Session cookie auth; `me` also returns server limits |
+| `GET /api/auth/providers`, `/api/auth/google/start`, `/api/auth/google/callback` | Optional Google sign-in (same session afterwards) |
 | `POST /api/transcript` | `{video_url, output_language: original\|en\|hi}` → transcript |
 | `GET /api/channel/{handle}/transcripts` | Synchronous channel run (≤ `MAX_VIDEOS_SYNC_EXPORT`) |
 | `POST /api/channel/{handle}/transcript-job` | Start a background job (≤ `MAX_VIDEOS_PER_JOB`) |
@@ -95,7 +98,10 @@ each one. The essentials:
 | `YOUTUBE_API_KEY` | yes | YouTube Data API v3 key (channel discovery, titles) |
 | `GROQ_API_KEY` | for STT / `en` / `hi` | Empty: only captioned videos and `original` mode work |
 | `JWT_SECRET_KEY` | production | ≥ 32 random chars; signs session cookies |
-| `AUTH_USERS` / `API_KEYS` | production (one of) | `user:role:scrypt-hash` / `name:role:sha256` |
+| `AUTH_USERS` / `API_KEYS` | production (one of these or Google) | `user:role:scrypt-hash` / `name:role:sha256` |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, `GOOGLE_ALLOWED_DOMAINS` (Workspace, `hd` checked) / `GOOGLE_ALLOWED_PERSONAL_EMAIL_DOMAINS` / `GOOGLE_ALLOW_ANY_ACCOUNT`, `GOOGLE_ADMIN_SUBJECTS` | no | Optional "Continue with Google"; see [docs/GOOGLE_SIGN_IN.md](docs/GOOGLE_SIGN_IN.md) |
+| `WHISPER_MAX_CONCURRENCY`, `STT_QUEUE_TIMEOUT_SECONDS`, `TRANSCRIPT_WORKER_THREADS` | no | Server-wide speech-to-text limit and the dedicated transcript worker pool |
+| `YOUTUBE_PROXY_URL`, `YTDLP_COOKIES_FILE` | no | Optional mitigations when YouTube blocks the server IP (`BOT_BLOCKED`); see docs/OPERATIONS.md |
 | `CORS_ORIGINS` | no | Only for cross-origin browser clients; never `*` |
 | `DATA_DIR` | no | Persistent data (`./data`; `/app/data` in Docker) |
 | `MAX_VIDEOS_PER_JOB`, `MAX_VIDEOS_SYNC_EXPORT`, `MAX_ACTIVE_JOBS[_PER_USER]` | no | Abuse/cost limits (100, 25, 4/2) |

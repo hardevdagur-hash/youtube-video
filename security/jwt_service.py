@@ -1,13 +1,15 @@
 """HS256 session tokens (PyJWT).
 
 Used by ``security.web_auth`` for the browser session cookie. Tokens carry the
-subject, role, type, issue/expiry times, issuer and audience; verification enforces
+subject, role, type, issue/expiry times, issuer, audience and a unique id (``jti``,
+used for logout revocation); verification enforces
 signature, expiry, issuer, audience and the expected token type.
 """
 
 from __future__ import annotations
 
 import os
+import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -56,6 +58,7 @@ class JWTService:
             "exp": now + timedelta(minutes=self._config.access_token_expire_minutes),
             "iss": self._config.issuer,
             "aud": self._config.audience,
+            "jti": secrets.token_urlsafe(16),  # lets a single session be revoked (logout)
         }
         if extra_claims:
             payload.update(extra_claims)

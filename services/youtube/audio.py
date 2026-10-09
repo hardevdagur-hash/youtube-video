@@ -9,8 +9,11 @@ from pathlib import Path
 import yt_dlp
 
 from config.settings import get_settings
+from services.transcript_failures import looks_bot_blocked
 
 logger = logging.getLogger(__name__)
+
+SOCKET_TIMEOUT_SECONDS = 30
 
 
 class AudioExtractionError(Exception):
@@ -37,6 +40,8 @@ class YouTubeAudioExtractor:
         self.max_duration_seconds = (
             max_duration_seconds if max_duration_seconds is not None else settings.stt_max_audio_seconds
         )
+        self._proxy_url = settings.youtube_proxy_url
+        self._cookies_file = settings.ytdlp_cookies_file
 
     def extract_audio(self, video_id: str) -> Path:
         """Download YouTube audio stream directly as an m4a/opus/aac file.
@@ -65,7 +70,12 @@ class YouTubeAudioExtractor:
             "no_warnings": True,
             "extract_flat": False,
             "noplaylist": True,
+            # A stalled connection must not hold a worker (and a speech-to-text slot) forever.
+            "socket_timeout": SOCKET_TIMEOUT_SECONDS,
+            "retries": 2,
+            "fragment_retries": 2,
         }
+        ydl_opts.update(self._network_options())
 
         url = f"https://www.youtube.com/watch?v={video_id}"
         logger.info("Extracting audio stream for %s (token=%s) via yt-dlp", video_id, unique_token)
@@ -99,11 +109,28 @@ class YouTubeAudioExtractor:
         except AudioExtractionError:
             raise
         except Exception as exc:
+            if looks_bot_blocked(str(exc)):
+                # Typical on datacenter IPs ("Sign in to confirm you're not a bot"): a property
+                # of this server's IP, not of the video. Never reported as "no captions".
+                logger.error("YouTube blocked the audio download for %s (bot check): %s", video_id, exc)
+                raise AudioExtractionError(
+                    f"YouTube blocked the audio download for {video_id} (bot check): {exc}",
+                    error_code="BOT_BLOCKED",
+                ) from exc
             logger.error("Audio extraction failed for %s: %s", video_id, exc)
             raise AudioExtractionError(
                 f"Audio extraction failed for {video_id}: {exc}",
                 error_code="AUDIO_EXTRACTION_FAILED",
             ) from exc
+
+    def _network_options(self) -> dict:
+        """Optional proxy / cookies (YOUTUBE_PROXY_URL, YTDLP_COOKIES_FILE); values never logged."""
+        options: dict = {}
+        if self._proxy_url:
+            options["proxy"] = self._proxy_url
+        if self._cookies_file is not None:
+            options["cookiefile"] = str(self._cookies_file)
+        return options
 
     def _check_downloadable(self, video_id: str, info: dict) -> None:
         if info.get("is_live") or info.get("live_status") in ("is_live", "is_upcoming"):

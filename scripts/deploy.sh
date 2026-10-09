@@ -9,30 +9,21 @@
 set -Eeuo pipefail
 
 cd "$(dirname "$0")/.."
-STATE_DIR=".deploy"
-HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"
-
-log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
-die() { log "ERROR: $*" >&2; exit 1; }
-
-env_value() {
-    # Value of KEY in .env without sourcing it (never executes .env content).
-    grep -E "^[[:space:]]*$1=" .env | tail -n 1 | cut -d= -f2- | sed -e 's/^["'\'']//' -e 's/["'\'']$//'
-}
+# shellcheck source=scripts/lib/common.sh
+. scripts/lib/common.sh
 
 preflight() {
     command -v docker >/dev/null || die "docker is not installed"
     docker compose version >/dev/null 2>&1 || die "the docker compose plugin is not installed"
     docker info >/dev/null 2>&1 || die "the docker daemon is not reachable"
-    [ -f .env ] || die ".env not found: copy .env.example to .env and fill it in (see README)"
+    [ -f "$ENV_FILE" ] || die ".env not found: copy .env.example to .env and fill it in (see README)"
 
     local missing=()
     for key in JWT_SECRET_KEY YOUTUBE_API_KEY; do
         [ -n "$(env_value "$key")" ] || missing+=("$key")
     done
-    if [ -z "$(env_value AUTH_USERS)" ] && [ -z "$(env_value API_KEYS)" ]; then
-        missing+=("AUTH_USERS or API_KEYS")
-    fi
+    auth_configured \
+        || missing+=("a sign-in method: AUTH_USERS, API_KEYS and/or complete Google sign-in (GOOGLE_*)")
     [ ${#missing[@]} -eq 0 ] || die "missing required settings in .env: ${missing[*]}"
     [ -n "$(env_value GROQ_API_KEY)" ] \
         || log "WARNING: GROQ_API_KEY is empty: speech-to-text fallback and translation are disabled"
@@ -56,19 +47,7 @@ image_tag() {
 }
 
 wait_healthy() {
-    local cid status waited=0
-    cid="$(docker compose ps -q app)"
-    [ -n "$cid" ] || return 1
-    while [ "$waited" -lt "$HEALTH_TIMEOUT" ]; do
-        status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$cid" 2>/dev/null || echo missing)"
-        case "$status" in
-            healthy) break ;;
-            unhealthy|missing) return 1 ;;
-        esac
-        sleep 3
-        waited=$((waited + 3))
-    done
-    [ "$status" = "healthy" ] || return 1
+    wait_app_healthy || return 1
     # End to end through nginx/TLS (-k: also valid for the bootstrap self-signed cert).
     if command -v curl >/dev/null; then
         local attempt
@@ -85,13 +64,13 @@ wait_healthy() {
 
 main() {
     preflight
-    mkdir -p "$STATE_DIR"
     local tag previous
     tag="$(image_tag)"
-    previous="$(cat "$STATE_DIR/current" 2>/dev/null || true)"
+    previous="$(deployed_tag || true)"
 
     log "Building transcript-app:${tag}"
-    IMAGE_TAG="$tag" docker compose build app
+    # --pull: base images (python, node) are refreshed so their security fixes are included.
+    IMAGE_TAG="$tag" docker compose build --pull app
 
     if [ -z "${SKIP_BACKUP:-}" ] && [ -n "$(docker compose ps -q app 2>/dev/null)" ]; then
         log "Backing up data before deploying"
@@ -101,17 +80,17 @@ main() {
     log "Starting transcript-app:${tag}"
     IMAGE_TAG="$tag" docker compose up -d --remove-orphans
 
-    if wait_healthy; then
-        [ -n "$previous" ] && [ "$previous" != "$tag" ] && printf '%s\n' "$previous" > "$STATE_DIR/previous"
-        printf '%s\n' "$tag" > "$STATE_DIR/current"
-        log "Deployed transcript-app:${tag}"
+    # A running nginx keeps its old configuration until reloaded (git pull edits the file).
+    if reload_nginx && wait_healthy; then
+        promote_image "$tag"
+        log "Deployed transcript-app:${tag} (now transcript-app:${CURRENT_TAG})"
         docker compose ps
         return 0
     fi
 
     log "Deployment of ${tag} failed health checks; recent app logs:"
     docker compose logs --tail 60 app || true
-    if [ -n "$previous" ] && docker image inspect "transcript-app:${previous}" >/dev/null 2>&1; then
+    if [ -n "$previous" ]; then
         log "Rolling back to transcript-app:${previous}"
         IMAGE_TAG="$previous" docker compose up -d --remove-orphans
         if wait_healthy; then

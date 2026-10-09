@@ -49,6 +49,19 @@ wait_https_ok() {
 
 job_status() { status_of -H "X-API-Key: $1" "$BASE_URL/api/transcript/jobs/$JOB_ID"; }
 
+assert_deployed_image_running() {
+    # The running app container must use the image recorded as deployed (.deploy/current),
+    # which must also be what transcript-app:current points to.
+    local tag running expected current
+    tag="$(cat .deploy/current 2>/dev/null || true)"
+    [ -n "$tag" ] || fail "$1: no deployed tag recorded"
+    running="$(docker inspect -f '{{.Image}}' "$(docker compose ps -q app)")"
+    expected="$(docker image inspect -f '{{.Id}}' "transcript-app:${tag}")"
+    current="$(docker image inspect -f '{{.Id}}' transcript-app:current)"
+    [ "$running" = "$expected" ] || fail "$1: running image is not transcript-app:${tag}"
+    [ "$current" = "$expected" ] || fail "$1: transcript-app:current is not transcript-app:${tag}"
+}
+
 log "0. Image contents: one worker, ffmpeg for long-audio chunking"
 encoders="$(docker compose exec -T app ffmpeg -hide_banner -encoders 2>/dev/null)" \
     || fail "ffmpeg missing from the app image"
@@ -62,6 +75,45 @@ log "1. TLS + health through nginx"
     || fail "plain HTTP must redirect to HTTPS"
 "${CURL[@]}" -D - -o /dev/null "$BASE_URL/" | grep -qi '^strict-transport-security:' || fail "HSTS header"
 "${CURL[@]}" -D - -o /dev/null "$BASE_URL/" | grep -qi '^content-security-policy:' || fail "CSP header"
+[ "$("${CURL[@]}" -D - -o /dev/null "$BASE_URL/transcript" | grep -ci '^x-robots-tag: noindex, nofollow')" = "1" ] \
+    || fail "exactly one X-Robots-Tag: noindex header expected on the app"
+"${CURL[@]}" "$BASE_URL/robots.txt" | grep -q '^Disallow: /$' || fail "robots.txt must disallow everything"
+assert_deployed_image_running "after deploy"
+
+log "1b. Google sign-in callback is routed by nginx and refuses a forged state"
+callback="$("${CURL[@]}" -o /dev/null -w '%{http_code} %{redirect_url}' \
+    "$BASE_URL/api/auth/google/callback?code=forged&state=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")"
+grep -q '^303 .*/transcript?auth_error=' <<< "$callback" || fail "Google callback through nginx: got '$callback'"
+docker compose logs --tail 50 nginx 2>/dev/null | grep -q 'code=forged' && fail "nginx logged the OAuth code"
+docker compose logs --tail 200 app 2>/dev/null | grep -q 'code=forged' && fail "the app logged the OAuth code"
+"${CURL[@]}" "$BASE_URL/api/auth/providers" | grep -q '"google":true' \
+    || fail "Google sign-in (CI dummy client) should be enabled in production"
+start="$("${CURL[@]}" -o /dev/null -w '%{http_code} %{redirect_url}' "$BASE_URL/api/auth/google/start")"
+grep -q '^302 https://accounts.google.com/' <<< "$start" || fail "Google start must redirect to Google: got '${start%%\?*}'"
+
+log "1c. nginx applies configuration edits on reload (directory mount)"
+conf=docker/nginx/nginx.conf
+has_test_header() { "${CURL[@]}" -D - -o /dev/null "$BASE_URL/" | grep -qi '^x-stack-test: reloaded'; }
+wait_test_header() {
+    # "nginx -s reload" only signals the master; old workers may answer for a moment.
+    local want="$1" waited=0
+    while [ "$waited" -lt 20 ]; do
+        if has_test_header; then [ "$want" = present ] && return 0; else [ "$want" = absent ] && return 0; fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    return 1
+}
+restore_conf() { mv -f "$conf.stacktest-orig" "$conf"; }
+cp "$conf" "$conf.stacktest-orig"
+sed -i 's|^\(\s*\)add_header X-Robots-Tag .*|&\n\1add_header X-Stack-Test "reloaded" always;|' "$conf"
+grep -q 'X-Stack-Test' "$conf" || { restore_conf; fail "could not edit the nginx config for the reload test"; }
+# shellcheck source=scripts/lib/common.sh
+( . scripts/lib/common.sh && reload_nginx ) || { restore_conf; fail "nginx reload failed"; }
+wait_test_header present || { restore_conf; fail "edited nginx config was not applied by reload"; }
+restore_conf
+( . scripts/lib/common.sh && reload_nginx ) || fail "nginx reload (restore) failed"
+wait_test_header absent || fail "restored nginx config not applied"
 
 log "2. Frontend served"
 "${CURL[@]}" "$BASE_URL/transcript" | grep -q '<div id="root">' || fail "SPA shell"
@@ -99,6 +151,16 @@ docker compose up -d >/dev/null
 wait_app_healthy || fail "app not healthy after down/up"
 wait_https_ok || fail "nginx not serving after down/up"
 [ "$(job_status "$API_KEY")" = "200" ] || fail "job lost after docker compose down/up"
+assert_deployed_image_running "after down/up"
+
+log "5b. Secret-rotation path (plain 'docker compose up -d app') keeps the deployed image"
+# A decoy :latest must never be started (older compose files defaulted to it).
+docker tag nginx:1.28-alpine transcript-app:latest
+docker compose up -d --force-recreate app >/dev/null
+wait_app_healthy || fail "app not healthy after recreate"
+wait_https_ok || fail "nginx not serving after recreate"
+assert_deployed_image_running "after docker compose up -d app"
+docker rmi transcript-app:latest >/dev/null
 
 log "6. CSV export (formula injection neutralised)"
 csv="$("${CURL[@]}" -H "X-API-Key: $API_KEY" "$BASE_URL/api/transcript/jobs/$JOB_ID/download")"
@@ -135,6 +197,7 @@ wait_https_ok || fail "nginx not serving after restore"
 [ "$(job_status "$API_KEY")" = "200" ] || fail "job not back after restore"
 "${CURL[@]}" -H "X-API-Key: $API_KEY" "$BASE_URL/api/transcript/jobs/$JOB_ID/download" | grep -q "hello world" \
     || fail "export of the restored job failed"
+assert_deployed_image_running "after restore"
 
 log "10. Rollback to an earlier image keeps the data"
 current_tag="$(cat .deploy/current 2>/dev/null || true)"
@@ -144,7 +207,11 @@ scripts/rollback.sh stacktest-previous
 wait_https_ok || fail "nginx not serving after rollback"
 [ "$(cat .deploy/current)" = "stacktest-previous" ] || fail "rollback did not record the new current tag"
 [ "$(job_status "$API_KEY")" = "200" ] || fail "job lost after rollback"
+assert_deployed_image_running "after rollback"
+[ "$(cat .deploy/previous)" = "$current_tag" ] || fail "rollback did not record the replaced tag as previous"
 scripts/rollback.sh "$current_tag" >/dev/null
 wait_https_ok || fail "nginx not serving after rolling forward again"
+[ "$(cat .deploy/current)" = "$current_tag" ] || fail "rolling forward did not record the tag"
+assert_deployed_image_running "after rolling forward"
 
 log "PASS: deployment stack test"

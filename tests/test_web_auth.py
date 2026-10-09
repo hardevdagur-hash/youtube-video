@@ -76,7 +76,9 @@ def test_invalid_api_key_rejected(auth_config):
 def test_valid_api_key_accepted(auth_config):
     resp = _client(TEST_USER_KEY).get("/api/auth/me")
     assert resp.status_code == 200
-    assert resp.json()["user"] == {"username": "key:user-key", "role": "user", "auth_method": "api_key"}
+    assert resp.json()["user"] == {
+        "username": "key:user-key", "role": "user", "auth_method": "api_key", "provider": "api_key",
+    }
 
 
 def test_anonymous_health_reveals_only_status(auth_config):

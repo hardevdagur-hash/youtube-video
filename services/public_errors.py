@@ -44,6 +44,10 @@ _ERRORS: dict[str, PublicError] = {
     "STT_RATE_LIMITED": PublicError(429, "The speech-to-text provider is rate limiting requests. Please retry later.", True),
     "STT_TIMEOUT": PublicError(504, "The speech-to-text provider timed out.", True),
     "STT_FAILED": PublicError(502, "Speech-to-text failed for this video.", True),
+    "STT_BUSY": PublicError(503, "Speech-to-text is busy with other videos. Please retry shortly.", True),
+    "BOT_BLOCKED": PublicError(
+        503, "YouTube is temporarily blocking requests from this server. Please retry later.", True,
+    ),
     "TRANSLATION_FAILED": PublicError(502, "The transcript could not be translated.", True),
     "EXTRACTION_ERROR": PublicError(500, "Transcript extraction failed.", True),
     "UNEXPECTED_ERROR": _DEFAULT,

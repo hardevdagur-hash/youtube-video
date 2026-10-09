@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { LogIn } from 'lucide-react';
 import { Button } from '../components/ui';
+import { consumeGoogleAuthError, fetchGoogleEnabled, GoogleSignInButton, SignInDivider } from './GoogleSignIn';
 
 /**
  * Session auth for the SPA.
@@ -193,6 +194,20 @@ export function LoginForm() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [googleEnabled, setGoogleEnabled] = useState(false);
+
+  useEffect(() => {
+    // A failed Google attempt comes back as /transcript?auth_error=<code>.
+    const googleError = consumeGoogleAuthError();
+    if (googleError) setError(googleError);
+    let cancelled = false;
+    fetchGoogleEnabled().then((enabled) => {
+      if (!cancelled) setGoogleEnabled(enabled);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -213,6 +228,12 @@ export function LoginForm() {
       >
         <h1 className="text-xl font-bold text-gray-900 dark:text-white">Sign in</h1>
         <p className="text-sm text-gray-500 dark:text-gray-400">Sign in to fetch and export transcripts.</p>
+        {googleEnabled && (
+          <>
+            <GoogleSignInButton />
+            <SignInDivider />
+          </>
+        )}
         <div>
           <label htmlFor="login-username" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1.5">
             Username

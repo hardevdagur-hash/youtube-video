@@ -6,6 +6,26 @@ function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
 
+/**
+ * Mock fetch by URL: each route answers with its queued responses in order (the last one
+ * repeats). Routing by URL keeps these tests independent of how many other requests the
+ * sign-in page makes (e.g. /api/auth/providers).
+ */
+function mockApi(routes: Record<string, Response[]>) {
+  const queues = Object.fromEntries(Object.entries(routes).map(([k, v]) => [k, [...v]]));
+  return vi.spyOn(window, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    const key = Object.keys(queues).find((path) => url.includes(path));
+    if (!key) return jsonResponse(404, { success: false });
+    const queue = queues[key];
+    const next = queue.length > 1 ? queue.shift()! : queue[0];
+    return next.clone();
+  });
+}
+
+const callsTo = (fetchMock: ReturnType<typeof mockApi>, path: string) =>
+  fetchMock.mock.calls.filter(([input]) => String(input).includes(path));
+
 function renderGate() {
   return render(
     <AuthProvider>
@@ -22,40 +42,38 @@ describe('RequireAuth', () => {
   });
 
   it('shows the sign-in form when there is no session', async () => {
-    vi.spyOn(window, 'fetch').mockResolvedValue(jsonResponse(401, { success: false }));
+    mockApi({ '/api/auth/me': [jsonResponse(401, { success: false })] });
     renderGate();
     expect(await screen.findByRole('form', { name: 'Sign in' })).toBeTruthy();
     expect(screen.queryByText('secret tool page')).toBeNull();
   });
 
   it('renders the page for an existing session', async () => {
-    vi.spyOn(window, 'fetch').mockResolvedValue(
-      jsonResponse(200, { success: true, user: { username: 'alice', role: 'user' } }),
-    );
+    mockApi({ '/api/auth/me': [jsonResponse(200, { success: true, user: { username: 'alice', role: 'user' } })] });
     renderGate();
     expect(await screen.findByText('secret tool page')).toBeTruthy();
   });
 
   it('signs in and then renders the page', async () => {
-    const fetchMock = vi.spyOn(window, 'fetch');
-    fetchMock.mockResolvedValueOnce(jsonResponse(401, { success: false }));
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse(200, { success: true, user: { username: 'alice', role: 'user' } }),
-    );
+    const fetchMock = mockApi({
+      '/api/auth/me': [jsonResponse(401, { success: false })],
+      '/api/auth/login': [jsonResponse(200, { success: true, user: { username: 'alice', role: 'user' } })],
+    });
     renderGate();
     fireEvent.change(await screen.findByLabelText('Username'), { target: { value: 'alice' } });
     fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'pw' } });
     fireEvent.submit(screen.getByRole('form', { name: 'Sign in' }));
     expect(await screen.findByText('secret tool page')).toBeTruthy();
-    const [url, init] = fetchMock.mock.calls[1];
-    expect(String(url)).toContain('/api/auth/login');
-    expect(init?.method).toBe('POST');
+    const [loginCall] = callsTo(fetchMock, '/api/auth/login');
+    expect(loginCall).toBeTruthy();
+    expect(loginCall[1]?.method).toBe('POST');
   });
 
   it('shows the server error for bad credentials', async () => {
-    const fetchMock = vi.spyOn(window, 'fetch');
-    fetchMock.mockResolvedValueOnce(jsonResponse(401, { success: false }));
-    fetchMock.mockResolvedValueOnce(jsonResponse(401, { success: false, error: 'Invalid username or password.' }));
+    mockApi({
+      '/api/auth/me': [jsonResponse(401, { success: false })],
+      '/api/auth/login': [jsonResponse(401, { success: false, error: 'Invalid username or password.' })],
+    });
     renderGate();
     fireEvent.change(await screen.findByLabelText('Username'), { target: { value: 'alice' } });
     fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'nope' } });
@@ -64,15 +82,14 @@ describe('RequireAuth', () => {
   });
 
   it('returns to the sign-in form when an API call reports 401', async () => {
-    const fetchMock = vi.spyOn(window, 'fetch');
-    fetchMock.mockResolvedValueOnce(
-      jsonResponse(200, { success: true, user: { username: 'alice', role: 'user' } }),
-    );
+    mockApi({
+      '/api/auth/me': [jsonResponse(200, { success: true, user: { username: 'alice', role: 'user' } })],
+      '/api/transcript/jobs/': [jsonResponse(401, { success: false })],
+    });
     installAuthInterceptor();
     renderGate();
     expect(await screen.findByText('secret tool page')).toBeTruthy();
 
-    fetchMock.mockResolvedValueOnce(jsonResponse(401, { success: false }));
     await act(async () => {
       await window.fetch('/api/transcript/jobs/0123456789ab');
     });

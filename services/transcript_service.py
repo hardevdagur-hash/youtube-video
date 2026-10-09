@@ -10,6 +10,9 @@ import time
 from typing import Any
 
 from clients.youtube_transcript_client import (
+    CaptionRequestFailedError as ClientCaptionRequestFailedError,
+)
+from clients.youtube_transcript_client import (
     NoTranscriptFoundError as ClientNoTranscriptFoundError,
 )
 from clients.youtube_transcript_client import (
@@ -40,6 +43,13 @@ from providers.manual_transcript_provider import ManualTranscriptProvider
 from providers.whisper_provider import WhisperProvider
 from repositories.transcript_repository import TranscriptRepository
 from services.english_converter import english_converter
+from services.public_errors import public_message
+from services.transcript_failures import (
+    PERMANENT_FAILURE_CODES,
+    TRANSIENT_STT_CODES,
+    classify_stt_error,
+    looks_bot_blocked,
+)
 from services.transliteration import hinglish_normalizer
 from utils.read_time import estimate_read_time
 from utils.text_cleaner import TextCleaner
@@ -48,6 +58,41 @@ logger = logging.getLogger(__name__)
 
 
 _VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+WHISPER_STAGE = "Whisper STT"
+
+
+def _step_field(step: Any, name: str) -> Any:
+    """Read a pipeline step field from a dict (in flight) or a PipelineStep (cached)."""
+    return step.get(name) if isinstance(step, dict) else getattr(step, name, None)
+
+
+def _stt_attempted(steps: list[Any]) -> bool:
+    """True if speech-to-text actually ran and produced a definitive answer.
+
+    A skipped run (STT not configured) or one that failed for a transient reason
+    (bot check, Groq outage, busy) does not count: the video may still have speech.
+    """
+    return any(
+        _step_field(s, "name") == WHISPER_STAGE
+        and _step_field(s, "status") != "skipped"
+        and _step_field(s, "error_type") not in TRANSIENT_STT_CODES
+        and not _legacy_stt_exception(s)
+        for s in steps or []
+    )
+
+
+def _legacy_stt_exception(step: Any) -> bool:
+    """A cached step from before failures were classified, recording an STT exception.
+
+    Such caches stored every speech-to-text exception (bot check, Groq outage...) as an
+    attempted run; only a definitive result (e.g. no speech found) may be trusted.
+    """
+    if _step_field(step, "error_type") or _step_field(step, "status") != "error":
+        return False
+    detail = str(_step_field(step, "detail") or "")
+    if not detail.startswith(("AudioDownloadError", "TranscriptionError", "Unexpected error")):
+        return False
+    return "too long" not in detail.lower() and "AUDIO_TOO_LONG" not in detail
 
 
 class SpeechToTextUnavailableError(RuntimeError):
@@ -166,11 +211,15 @@ class TranscriptService:
         if self._use_cache and not force_refresh:
             cached = self._repository.get(video_id)
             if cached is not None:
-                if not cached.success and getattr(cached, "error_code", None) in ("RATE_LIMITED", "NETWORK_ERROR", "TIMEOUT"):
+                if not cached.success and getattr(cached, "error_code", None) not in PERMANENT_FAILURE_CODES:
+                    # Only facts about the video are reusable; older caches may hold transient
+                    # failures (rate limits, STT outages) that must be retried.
                     logger.info("Ignoring transient cached failure for %s (code=%s)", video_id, getattr(cached, "error_code", None))
-                elif not cached.success and allow_whisper and not any(
-                    (getattr(s, "name", "") == "Whisper STT" if hasattr(s, "name") else (s.get("name") == "Whisper STT" if isinstance(s, dict) else False))
-                    for s in (cached.pipeline_steps or [])
+                elif (
+                    not cached.success
+                    and allow_whisper
+                    and cached.error_code not in ("VIDEO_UNAVAILABLE", "PRIVATE_VIDEO")  # no audio either
+                    and not _stt_attempted(cached.pipeline_steps)
                 ):
                     logger.info("Ignoring cached caption failure for %s because allow_whisper=True and Whisper not yet attempted", video_id)
                 elif cached.success and self._is_translated_whisper_result(cached):
@@ -201,9 +250,11 @@ class TranscriptService:
             channel_title=channel_title,
         )
 
+        # A YouTube rate limit or bot check on captions: stop all further YouTube traffic
+        # for this video (auto captions, audio download) until the limiter's cooldown.
         is_rate_limited = (
             step_manual is not None
-            and step_manual.get("error_type") == "RATE_LIMITED"
+            and step_manual.get("error_type") in ("RATE_LIMITED", "BOT_BLOCKED")
         )
 
         # Stage 2: Auto transcript (SKIP if Stage 1 was RATE_LIMITED to protect YouTube IP)
@@ -217,7 +268,7 @@ class TranscriptService:
                 "name": "Auto Transcript",
                 "status": "skipped",
                 "detail": "Skipped due to YouTube rate limiting",
-                "error_type": "RATE_LIMITED",
+                "error_type": step_manual.get("error_type"),
             })
         else:
             step_auto = self._execute_stage(
@@ -229,7 +280,7 @@ class TranscriptService:
                 video_title=video_title,
                 channel_title=channel_title,
             )
-            if step_auto and step_auto.get("error_type") == "RATE_LIMITED":
+            if step_auto and step_auto.get("error_type") in ("RATE_LIMITED", "BOT_BLOCKED"):
                 is_rate_limited = True
 
         # Determine best result - prefer manual over auto
@@ -293,8 +344,11 @@ class TranscriptService:
             "detail": "No transcript available from any source.",
         })
         error_result = self._build_error_result(video_id, pipeline_steps)
-        if getattr(error_result, "error_code", None) not in ("RATE_LIMITED", "NETWORK_ERROR", "TIMEOUT"):
+        if getattr(error_result, "error_code", None) in PERMANENT_FAILURE_CODES:
+            # Only facts about the video are cached; transient failures stay retryable.
             self._repository.save(error_result)
+        else:
+            logger.info("Not caching transient failure for %s (code=%s)", video_id, error_result.error_code)
         logger.debug("All transcript stages failed for %s", video_id)
         return error_result
 
@@ -343,6 +397,30 @@ class TranscriptService:
         except Exception as exc:
             exc_type = type(exc).__name__
 
+            if stage_name == WHISPER_STAGE:
+                # Speech-to-text failures never touch the YouTube circuit breaker (a Groq 429
+                # is not a YouTube 429) and are classified so transient ones stay retryable.
+                code = classify_stt_error(exc)
+                log = logger.warning if code in TRANSIENT_STT_CODES else logger.info
+                log("Speech-to-text failed for %s (%s): %s: %s", video_id, code, exc_type, exc)
+                step["status"] = "error"
+                step["detail"] = f"{exc_type}: {exc}"
+                step["error_type"] = code
+                return step
+
+            if looks_bot_blocked(str(exc)):
+                # YouTube refuses this server (bot check / IP block), not this video.
+                try:
+                    from services.transcript_limiter import transcript_limiter
+                    transcript_limiter.record_rate_limit(video_id)
+                except Exception as limiter_exc:
+                    logger.warning("Transcript limiter rate-limit bookkeeping failed: %s", limiter_exc)
+                logger.warning("YouTube blocked caption request for %s (%s): %s", video_id, stage_name, exc)
+                step["status"] = "skipped"
+                step["detail"] = str(exc)
+                step["error_type"] = "BOT_BLOCKED"
+                return step
+
             if isinstance(exc, TranscriptDisabledError | ClientTranscriptsDisabledError):
                 step["status"] = "skipped"
                 step["detail"] = str(exc)
@@ -366,6 +444,13 @@ class TranscriptService:
                 step["error_type"] = "VIDEO_UNAVAILABLE"
                 return step
 
+            if isinstance(exc, ClientCaptionRequestFailedError):
+                # The request failed (network, TLS...): not evidence that captions are missing.
+                step["status"] = "skipped"
+                step["detail"] = str(exc)
+                step["error_type"] = "REQUEST_FAILED"
+                return step
+
             if isinstance(exc, TranscriptUnavailableError | ClientNoTranscriptFoundError):
                 step["status"] = "skipped"
                 step["detail"] = str(exc)
@@ -381,7 +466,7 @@ class TranscriptService:
             if isinstance(exc, AudioDownloadError | TranscriptionError):
                 step["status"] = "error"
                 step["detail"] = f"{exc_type}: {exc}"
-                step["error_type"] = "LIBRARY_ERROR"
+                step["error_type"] = classify_stt_error(exc)
                 return step
 
             logger.exception("Unexpected error in stage '%s' for %s", stage_name, video_id)
@@ -475,44 +560,55 @@ class TranscriptService:
         video_id: str,
         pipeline_steps: list[dict[str, Any]],
     ) -> TranscriptResult:
-        """Build a failed TranscriptResult when all stages fail."""
-        error_code = "NO_CAPTIONS"
-        error_message = "No transcript/caption track is available for this video."
+        """Build a failed TranscriptResult when all stages fail.
 
-        # Scan pipeline steps for specific error type
-        error_types = [
-            s.get("error_type") for s in pipeline_steps
-            if isinstance(s, dict) and s.get("error_type")
-        ]
-        step_details = " ".join(
-            str(s.get("detail", "")) for s in pipeline_steps
-            if isinstance(s, dict)
-        ).lower()
+        Codes that describe the video (NO_CAPTIONS, CAPTIONS_DISABLED, VIDEO_UNAVAILABLE)
+        are reported only on typed evidence; anything uncertain (YouTube blocking, request
+        or speech-to-text failures) yields a transient code so the result is not cached.
+        """
+        caption_steps = [s for s in pipeline_steps if isinstance(s, dict) and s.get("name") != WHISPER_STAGE]
+        stt_steps = [s for s in pipeline_steps if isinstance(s, dict) and s.get("name") == WHISPER_STAGE]
+        error_types = {s.get("error_type") for s in pipeline_steps if isinstance(s, dict) and s.get("error_type")}
+        caption_types = {s.get("error_type") for s in caption_steps if s.get("error_type")}
+        stt_types = {s.get("error_type") for s in stt_steps if s.get("error_type")}
+        # Free text only from caption stages: a Groq "rate limit" is not a YouTube rate limit.
+        caption_details = " ".join(str(s.get("detail", "")) for s in caption_steps).lower()
+        transient_stt = sorted(stt_types & TRANSIENT_STT_CODES)
 
-        if "RATE_LIMITED" in error_types or "too many requests" in step_details or "rate limited" in step_details:
+        if "BOT_BLOCKED" in error_types:
+            error_code = "BOT_BLOCKED"
+            error_message = "YouTube is temporarily blocking requests from this server. Please retry later."
+        elif "RATE_LIMITED" in error_types or "too many requests" in caption_details or "rate limited" in caption_details:
             error_code = "RATE_LIMITED"
             error_message = "Rate limited by YouTube. Please retry later."
-        elif "VIDEO_UNAVAILABLE" in error_types or "unavailable" in step_details:
+        elif "VIDEO_UNAVAILABLE" in caption_types:
             error_code = "VIDEO_UNAVAILABLE"
             error_message = "This video is unavailable, private, or deleted."
-        elif "CAPTIONS_DISABLED" in error_types or "subtitles are disabled" in step_details or "transcripts disabled" in step_details:
+        elif transient_stt:
+            error_code = transient_stt[0]
+            error_message = public_message(error_code)
+        elif caption_types & {"REQUEST_FAILED", "UNKNOWN_ERROR"}:
+            if "timeout" in caption_details or "timed out" in caption_details:
+                error_code = "TIMEOUT"
+                error_message = "Connection to YouTube timed out."
+            else:
+                error_code = "NETWORK_ERROR"
+                error_message = "Network error connecting to YouTube."
+        elif "AUDIO_TOO_LONG" in stt_types:
+            error_code = "AUDIO_TOO_LONG"
+            error_message = public_message(error_code)
+        elif (
+            "CAPTIONS_DISABLED" in caption_types
+            or "subtitles are disabled" in caption_details
+            or "transcripts disabled" in caption_details
+        ):
             error_code = "CAPTIONS_DISABLED"
             error_message = "Subtitles/transcripts are disabled or not available for this video on YouTube."
-        elif "timeout" in step_details or "timed out" in step_details:
-            error_code = "TIMEOUT"
-            error_message = "Connection to YouTube timed out."
-        elif "ssl" in step_details or "connection error" in step_details:
-            error_code = "NETWORK_ERROR"
-            error_message = "Network error connecting to YouTube."
-        elif "NO_CAPTIONS" in error_types:
+        else:
             error_code = "NO_CAPTIONS"
             error_message = "No transcript/caption track is available for this video."
 
-        whisper_attempted = any(
-            (getattr(s, "name", "") == "Whisper STT" if hasattr(s, "name") else (s.get("name") == "Whisper STT" if isinstance(s, dict) else False))
-            and (getattr(s, "status", "") != "skipped" if hasattr(s, "status") else (s.get("status") != "skipped" if isinstance(s, dict) else False))
-            for s in pipeline_steps
-        )
+        whisper_attempted = any(_step_field(s, "status") != "skipped" for s in stt_steps)
         return TranscriptResult(
             success=False,
             video_id=video_id,

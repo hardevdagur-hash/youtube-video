@@ -19,11 +19,13 @@ from typing import Any
 
 from config.settings import get_settings
 from repositories.transcript_repository import TranscriptRepository
+from services.transcript_limiter import transcript_limiter
 from services.transcription.cleaner import TranscriptCleaner
 from services.transcription.groq import (
     GroqWhisperProvider,
 )
 from services.transcription.provider import TranscriptionProvider
+from services.transcription.stt_gate import stt_gate
 from services.transcription.validator import (
     TranscriptValidator,
 )
@@ -43,6 +45,10 @@ logger = logging.getLogger(__name__)
 # per video id would grow forever); unrelated videos rarely share a stripe.
 _LOCK_STRIPES = 64
 _video_lock_stripes = tuple(threading.Lock() for _ in range(_LOCK_STRIPES))
+
+
+#: Caption failures after which speech-to-text must not be attempted.
+_NO_STT_FALLBACK_CODES = frozenset({"CAPTIONS_RATE_LIMITED", "BOT_BLOCKED", "VIDEO_UNAVAILABLE"})
 
 
 def _get_video_lock(video_id: str) -> threading.Lock:
@@ -156,6 +162,14 @@ class TranscriptService:
         source_provider: str = ""
         duration_seconds: float | None = None
 
+        # While YouTube is rate limiting / bot-checking this server, do not contact it at
+        # all: neither captions nor an audio download would succeed, and both prolong the block.
+        if transcript_limiter.is_in_cooldown():
+            raise CaptionsUnavailableError(
+                f"YouTube cooldown active ({transcript_limiter.remaining_cooldown_seconds():.0f}s left)",
+                error_code="CAPTIONS_RATE_LIMITED",
+            )
+
         # STEP 3: Try YouTube Captions
         captions_available = False
         try:
@@ -168,6 +182,7 @@ class TranscriptService:
             source_language = cap_lang
             source_provider = "youtube_captions"
             captions_available = True
+            transcript_limiter.record_success(video_id)
             logger.info(
                 "[Step 3] YouTube captions available for %s (%d segments, lang=%s)",
                 video_id,
@@ -175,16 +190,26 @@ class TranscriptService:
                 source_language,
             )
         except CaptionsUnavailableError as cap_err:
+            if cap_err.error_code in _NO_STT_FALLBACK_CODES:
+                # Rate limit / bot check: more YouTube traffic (audio download) and Groq
+                # spend would not help. Unavailable video: there is no audio to transcribe.
+                if cap_err.error_code in ("CAPTIONS_RATE_LIMITED", "BOT_BLOCKED"):
+                    transcript_limiter.record_rate_limit(video_id)
+                logger.warning(
+                    "[Step 3] Captions failed for %s (%s); not falling back to STT",
+                    video_id, cap_err.error_code,
+                )
+                raise
             logger.info(
                 "[Step 4] YouTube captions unavailable for %s (%s). Falling back to STT.",
                 video_id,
                 cap_err.message,
             )
 
-        # STEP 4: Fallback to Audio Extraction + Groq Whisper Large V3
+        # STEP 4: Fallback to Audio Extraction + Groq Whisper Large V3 (one process-wide slot)
         if not captions_available:
             logger.info("[Step 4] Starting audio acquisition and Groq Whisper Large V3...")
-            with self.audio_extractor.audio_context(video_id) as audio_path:
+            with stt_gate.slot(video_id), self.audio_extractor.audio_context(video_id) as audio_path:
                 logger.info("[Step 4] Audio ready at %s. Sending to Groq Whisper...", audio_path)
                 stt_result = self.transcription_provider.transcribe(audio_path)
                 raw_text = stt_result.text

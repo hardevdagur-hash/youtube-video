@@ -9,6 +9,7 @@ Uses googleapiclient with a patched httplib2 that:
 import contextlib
 import logging
 import ssl
+import threading
 import time
 
 import httplib2
@@ -129,8 +130,25 @@ class YouTubeClient:
         # Resolve the key at construction time, not import time: a default argument
         # would freeze whatever key existed when this module was first imported.
         self._api_key = api_key if api_key is not None else settings.youtube_api_key
-        self._service: Resource | None = None
-        self._http: httplib2.Http | None = None
+        # httplib2.Http (and the service built on it) is not thread-safe, while one client
+        # is shared by concurrent worker threads: each thread gets its own pair.
+        self._local = threading.local()
+
+    @property
+    def _service(self) -> Resource | None:
+        return getattr(self._local, "service", None)
+
+    @_service.setter
+    def _service(self, service: Resource | None) -> None:
+        self._local.service = service
+
+    @property
+    def _http(self) -> httplib2.Http | None:
+        return getattr(self._local, "http", None)
+
+    @_http.setter
+    def _http(self, http: httplib2.Http | None) -> None:
+        self._local.http = http
 
     def _build_http(self) -> httplib2.Http:
         """Build an httplib2.Http with proper SSL configuration."""

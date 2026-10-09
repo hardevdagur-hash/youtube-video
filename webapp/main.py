@@ -39,7 +39,14 @@ from pathlib import Path
 from fastapi import FastAPI, Query, Request
 from fastapi import Path as PathParam
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -52,7 +59,16 @@ from infrastructure.request_context import (
     user_var,
 )
 from infrastructure.validation import RequestValidationMiddleware
+from infrastructure.work_pool import run_transcript_work
+from infrastructure.work_pool import shutdown as shutdown_transcript_work
 from models.api_response import error_response, success_response
+from security.google_oauth import (
+    STATE_COOKIE,
+    STATE_COOKIE_PATH,
+    STATE_TTL_SECONDS,
+    GoogleAuthError,
+)
+from security.google_users import GoogleUserStore
 from security.web_auth import (
     SESSION_COOKIE,
     AuthMiddleware,
@@ -74,8 +90,14 @@ logger = logging.getLogger("webapp")
 
 
 def _to_thread(func, *args, **kwargs):
-    """Run blocking work in the default thread pool, keeping the logging context (request id)."""
+    """Run short blocking work in the default thread pool, keeping the logging context (request id)."""
     return asyncio.to_thread(func, *args, **kwargs)
+
+
+def _transcript_work(func, *args, **kwargs):
+    """Run long transcript work (captions, audio, speech-to-text, translation) on its own
+    bounded pool, so it can never starve sign-in, health checks or other short calls."""
+    return run_transcript_work(func, *args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -140,13 +162,15 @@ async def lifespan(_app: FastAPI):
     finally:
         sweeper.cancel()
         await transcript_job_manager.shutdown()
+        shutdown_transcript_work()
         logger.info("Transcript service stopped")
 
 
 # Security configuration: fails fast in production when credentials/secrets are unsafe
 _auth_settings = AuthSettings.from_env()
 _auth_settings.validate()
-_authenticator = WebAuthenticator(_auth_settings)
+# Google accounts persist in DATA_DIR like jobs and transcripts (included in backups).
+_authenticator = WebAuthenticator(_auth_settings, google_users=GoogleUserStore(settings.data_dir / "users"))
 
 app = FastAPI(
     title="YouTube Transcript Service",
@@ -192,6 +216,8 @@ async def request_context_middleware(request: Request, call_next):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        # Private application: nothing here is meant for search engines.
+        response.headers["X-Robots-Tag"] = "noindex, nofollow"
         return response
     finally:
         duration_ms = round((time.perf_counter() - start) * 1000, 1)
@@ -282,23 +308,110 @@ async def api_auth_login(body: LoginRequest, request: Request):
         logger.warning("Failed login for user=%r from ip=%s (consecutive failures from this ip: %d)", username[:64], ip, failures)
         return JSONResponse(status_code=401, content={"success": False, "error": "Invalid username or password.", "error_code": "INVALID_CREDENTIALS"})
     throttle.record_success(ip, username)
-    token = _authenticator.issue_session(principal)
     response = JSONResponse(content={"success": True, "user": {"username": principal.subject, "role": principal.role}})
+    _start_session(response, principal)
+    logger.info("User %s logged in from ip=%s", principal.subject, ip)
+    return response
+
+
+def _start_session(response, principal: Principal) -> None:
+    """The one way a browser session begins (password or Google): the existing JWT cookie."""
     response.set_cookie(
         SESSION_COOKIE,
-        token,
+        _authenticator.issue_session(principal),
         max_age=_auth_settings.session_ttl_minutes * 60,
         httponly=True,
         secure=_auth_settings.is_production,
         samesite="strict",
         path="/",
     )
-    logger.info("User %s logged in from ip=%s", principal.subject, ip)
+
+
+@app.get("/api/auth/providers")
+async def api_auth_providers():
+    """Which sign-in methods the login page should offer (public)."""
+    return {
+        "success": True,
+        "providers": {
+            "password": bool(_auth_settings.users),
+            "google": _authenticator.google_enabled,
+        },
+    }
+
+
+_APP_HOME = "/transcript"
+
+
+def _google_redirect(target: str) -> RedirectResponse:
+    """Same-origin redirect (relative URL) that also ends the in-flight OAuth attempt."""
+    response = RedirectResponse(target, status_code=303)
+    response.headers["Cache-Control"] = "no-store"
+    response.delete_cookie(STATE_COOKIE, path=STATE_COOKIE_PATH, httponly=True,
+                           secure=_auth_settings.is_production, samesite="lax")
+    return response
+
+
+def _google_failure(code: str) -> RedirectResponse:
+    # Only a fixed, coarse code reaches the browser; details stay in the server log.
+    return _google_redirect(f"{_APP_HOME}?auth_error={code}")
+
+
+@app.get("/api/auth/google/start")
+async def api_auth_google_start(request: Request):
+    """Begin Google sign-in: new single-use state/nonce/PKCE, then redirect to Google."""
+    ip = _authenticator.client_ip(request)
+    if not _authenticator.oauth_limiter.allow(f"ip:{ip}"):
+        logger.warning("Google sign-in start rate limited for ip=%s", ip)
+        return _google_failure("rate_limited")
+    if not _authenticator.google_enabled or _authenticator.google_client is None:
+        return _google_failure("unavailable")
+    state, pending = _authenticator.oauth_states.create()
+    response = RedirectResponse(_authenticator.google_client.authorization_url(state, pending), status_code=302)
+    response.headers["Cache-Control"] = "no-store"
+    # Binds the attempt to this browser (login CSRF). Lax: it must survive the top-level
+    # redirect back from accounts.google.com; it is scoped to the callback path only.
+    response.set_cookie(
+        STATE_COOKIE, state, max_age=STATE_TTL_SECONDS, httponly=True,
+        secure=_auth_settings.is_production, samesite="lax", path=STATE_COOKIE_PATH,
+    )
+    return response
+
+
+@app.get("/api/auth/google/callback")
+async def api_auth_google_callback(request: Request):
+    """Google redirects here with ?code&state (or ?error). Never returns tokens or details."""
+    ip = _authenticator.client_ip(request)
+    if not _authenticator.oauth_limiter.allow(f"ip:{ip}"):
+        logger.warning("Google sign-in callback rate limited for ip=%s", ip)
+        return _google_failure("rate_limited")
+    params = request.query_params
+    try:
+        principal, created = await _to_thread(
+            _authenticator.complete_google_login,
+            state=params.get("state"),
+            cookie_state=request.cookies.get(STATE_COOKIE),
+            code=params.get("code"),
+            error=params.get("error"),
+        )
+    except GoogleAuthError as exc:
+        level = logging.INFO if exc.code == "cancelled" else logging.WARNING
+        logger.log(level, "Google sign-in refused (%s) from ip=%s: %s", exc.code, ip, exc)
+        return _google_failure(exc.public_code)
+    except Exception:
+        logger.exception("Google sign-in failed unexpectedly from ip=%s", ip)
+        return _google_failure("failed")
+    response = _google_redirect(_APP_HOME)
+    _start_session(response, principal)
+    logger.info("User %s signed in with Google (new account: %s, role=%s) from ip=%s",
+                principal.subject, created, principal.role, ip)
     return response
 
 
 @app.post("/api/auth/logout")
-async def api_auth_logout():
+async def api_auth_logout(request: Request):
+    # End the session server-side too, so a copy of the cookie stops working immediately.
+    if _authenticator.revoke_session(request.cookies.get(SESSION_COOKIE)):
+        logger.info("Session ended by logout")
     response = JSONResponse(content={"success": True})
     response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=_auth_settings.is_production, samesite="strict")
     return response
@@ -309,7 +422,12 @@ async def api_auth_me(request: Request):
     principal = _principal(request)
     return {
         "success": True,
-        "user": {"username": principal.subject, "role": principal.role, "auth_method": principal.auth_method},
+        "user": {
+            "username": principal.display_name or principal.subject,
+            "role": principal.role,
+            "auth_method": principal.auth_method,
+            "provider": principal.provider,
+        },
         # Server-enforced caps, so the UI can bound its inputs instead of hitting 422s.
         "limits": {
             "max_videos_per_job": settings.max_videos_per_job,
@@ -335,6 +453,12 @@ def _spa_index() -> FileResponse | HTMLResponse:
 @app.get("/transcript")
 async def spa_routes():
     return _spa_index()
+
+
+@app.get("/robots.txt", include_in_schema=False)
+async def robots_txt() -> PlainTextResponse:
+    """Ask crawlers to stay out; access control itself is enforced server-side."""
+    return PlainTextResponse("User-agent: *\nDisallow: /\n")
 
 
 # ---------------------------------------------------------------------------
@@ -466,7 +590,7 @@ async def _localized_transcript(
         return raw_text, source_language, False
     try:
         _, trans_svc = _get_unified_services()
-        result = await _to_thread(
+        result = await _transcript_work(
             trans_svc.translate,
             video_id=video_id,
             original_text=raw_text,
@@ -503,6 +627,7 @@ async def api_transcript_unified(request: UnifiedTranscriptRequest):
         GroqTimeoutError,
         GroqTranscriptionError,
     )
+    from services.transcription.stt_gate import STTBusyError
     from services.transcription.validator import (
         TranscriptEmptyError,
         TranscriptValidationError,
@@ -523,7 +648,7 @@ async def api_transcript_unified(request: UnifiedTranscriptRequest):
     try:
         ts_service, trans_service = _get_unified_services()
         # Fetch or generate canonical transcript in worker thread
-        canonical = await _to_thread(ts_service.get_canonical_transcript, request.video_url)
+        canonical = await _transcript_work(ts_service.get_canonical_transcript, request.video_url)
 
         video_id = canonical["video_id"]
         source_lang = canonical["source_language"]
@@ -556,7 +681,7 @@ async def api_transcript_unified(request: UnifiedTranscriptRequest):
 
         if out_lang in ("en", "hi"):
             try:
-                trans_result = await _to_thread(
+                trans_result = await _transcript_work(
                     trans_service.translate,
                     video_id=video_id,
                     original_text=canonical_text,
@@ -619,10 +744,15 @@ async def api_transcript_unified(request: UnifiedTranscriptRequest):
         transcript_metrics.record_final_result(success=False)
         return _transcript_error(rid, exc.error_code)
     except AudioExtractionError as exc:
-        logger.error("[%s] Audio extraction failed: %s", rid, exc)
+        logger.error("[%s] Audio extraction failed (%s): %s", rid, exc.error_code, exc)
         transcript_metrics.record_groq_fallback(success=False)
         transcript_metrics.record_final_result(success=False)
-        return _transcript_error(rid, "AUDIO_TOO_LONG" if exc.error_code == "AUDIO_TOO_LONG" else "AUDIO_EXTRACTION_FAILED")
+        code = exc.error_code if exc.error_code in ("AUDIO_TOO_LONG", "BOT_BLOCKED") else "AUDIO_EXTRACTION_FAILED"
+        return _transcript_error(rid, code)
+    except STTBusyError as exc:
+        logger.warning("[%s] Speech-to-text busy: %s", rid, exc)
+        transcript_metrics.record_final_result(success=False)
+        return _transcript_error(rid, exc.error_code)
     except GroqAuthError as exc:
         # Server misconfiguration (missing/invalid GROQ_API_KEY). Never 401: that status
         # means "your session is invalid" to the browser client and would log the user out.
@@ -834,7 +964,7 @@ async def api_channel_transcripts(
 
                 # 1. Try caption first
                 try:
-                    res = await _to_thread(
+                    res = await _transcript_work(
                         transcript_svc.get_transcript, video_id, allow_whisper=False,
                         output_format=output_language,
                     )
@@ -868,7 +998,7 @@ async def api_channel_transcripts(
                 # 2. Try Whisper fallback if enabled
                 if allow_whisper and settings.whisper_enabled:
                     try:
-                        w_res = await _to_thread(
+                        w_res = await _transcript_work(
                             transcript_svc.get_transcript,
                             video_id,
                             allow_whisper=True,
@@ -1322,7 +1452,7 @@ async def api_transcript_csv_export(req: TranscriptExportRequest):
                     video_url = f"https://www.youtube.com/watch?v={video_id}"
 
                     try:
-                        transcript = await _to_thread(
+                        transcript = await _transcript_work(
                             transcript_svc.get_transcript,
                             video_id,
                             allow_whisper=settings.whisper_enabled,
@@ -1444,7 +1574,7 @@ async def api_transcript_csv_export(req: TranscriptExportRequest):
             error_code = None
             error_message = None
             try:
-                transcript = await _to_thread(
+                transcript = await _transcript_work(
                     transcript_svc.get_transcript,
                     video_id,
                     allow_whisper=settings.whisper_enabled,

@@ -21,20 +21,25 @@ from pathlib import Path
 
 from config.settings import settings
 from infrastructure.request_context import job_id_var
+from infrastructure.work_pool import run_transcript_work
 from models.transcript_job import JobStatus, TranscriptJobProgress, TranscriptVideoItem
 from services.channel_discovery import scan_channel_uploads
 from services.csv_safety import safe_csv_row
 from services.public_errors import public_message
+from services.transcript_failures import TRANSIENT_STT_CODES, YOUTUBE_BLOCK_CODES
 from services.transcript_limiter import transcript_limiter
 
 logger = logging.getLogger(__name__)
 
 _JOB_ID_RE = re.compile(r"^[0-9a-f]{12}$")
 
+# Failures that say nothing about the video: the item stays resumable ("temporary_error").
+RETRYABLE_ITEM_CODES = TRANSIENT_STT_CODES | YOUTUBE_BLOCK_CODES | {"NETWORK_ERROR", "TIMEOUT"}
+
 
 def _to_thread(func, *args, **kwargs):
-    """Blocking provider calls run in the thread pool with the job's logging context."""
-    return asyncio.to_thread(func, *args, **kwargs)
+    """Blocking provider calls run on the transcript worker pool with the job's logging context."""
+    return run_transcript_work(func, *args, **kwargs)
 
 
 def _job_duration_seconds(job: TranscriptJobProgress) -> float | None:
@@ -607,9 +612,11 @@ class TranscriptJobManager:
             1 for v in job.videos
             if v.status == "no_captions" or v.error_code in ("NO_CAPTIONS", "CAPTIONS_DISABLED")
         )
+        # Retryable items: YouTube rate limits plus temporary failures (bot checks, speech-to-
+        # text outages, network errors); "Resume" processes all of them again.
         job.rate_limited = sum(
             1 for v in job.videos
-            if v.status == "rate_limited" or v.error_code == "RATE_LIMITED"
+            if v.status in ("rate_limited", "temporary_error") or v.error_code == "RATE_LIMITED"
         )
         job.failed = sum(
             1 for v in job.videos
@@ -736,13 +743,21 @@ class TranscriptJobManager:
                     error_code = getattr(res, "error_code", None) or "NO_CAPTIONS"
                     error_msg = getattr(res, "error", "") or "No captions available"
 
-                    # Handle RATE_LIMITED signal
-                    if error_code == "RATE_LIMITED":
+                    # YouTube rate limit or bot check: cool down, then retry the same item.
+                    if error_code in YOUTUBE_BLOCK_CODES:
                         consecutive_rate_limits += 1
-                        cooldown = transcript_limiter.record_rate_limit(item.video_id)
+                        # The service already tripped the limiter in its thread; only record
+                        # here if it did not (recording twice doubles the backoff exponent).
+                        if transcript_limiter.is_in_cooldown():
+                            cooldown = transcript_limiter.remaining_cooldown_seconds()
+                        else:
+                            cooldown = transcript_limiter.record_rate_limit(item.video_id)
                         item.status = "rate_limited"
-                        item.error_code = "RATE_LIMITED"
-                        item.error_message = "Rate limited by YouTube. System in cooldown."
+                        item.error_code = "RATE_LIMITED" if error_code != "BOT_BLOCKED" else "BOT_BLOCKED"
+                        item.error_message = (
+                            "Rate limited by YouTube. System in cooldown." if error_code != "BOT_BLOCKED"
+                            else public_message("BOT_BLOCKED")
+                        )
                         item.retryable = True
 
                         logger.warning(
@@ -803,11 +818,26 @@ class TranscriptJobManager:
                                 acquired_success = True
                                 await self._apply_output_language(job, item)
                                 break
+                            whisper_code = getattr(whisper_res, "error_code", None)
+                            if whisper_code in RETRYABLE_ITEM_CODES:
+                                # Speech-to-text could not run (bot check, Groq outage, busy,
+                                # network): the video may well have speech. Keep it resumable.
+                                error_code = whisper_code
+                                error_msg = public_message(whisper_code)
                         except Exception as w_exc:
                             logger.warning("Whisper STT fallback failed for %s: %s", item.video_id, w_exc)
+                            error_code = "STT_FAILED"
+                            error_msg = public_message("STT_FAILED")
 
                     # Mark non-rate-limited failure
-                    if error_code in ("NO_CAPTIONS", "CAPTIONS_DISABLED"):
+                    if error_code in RETRYABLE_ITEM_CODES:
+                        logger.warning("[Job %s] Video %s failed temporarily (%s); it stays resumable",
+                                       job.job_id, item.video_id, error_code)
+                        item.status = "temporary_error"
+                        item.error_code = error_code
+                        item.error_message = error_msg
+                        item.retryable = True
+                    elif error_code in ("NO_CAPTIONS", "CAPTIONS_DISABLED"):
                         item.status = "no_captions"
                         item.error_code = error_code
                         item.error_message = error_msg

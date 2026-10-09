@@ -9,7 +9,8 @@ Two layers, so a secret cannot reach stdout, log files or any other handler:
 2. ``RedactingFormatter`` / ``redact()`` redact the final formatted string, which
    also covers structured ``extra`` fields attached after record creation.
 
-Redaction targets: credential query parameters (``key=``, ``api_key=``, ``token=``...),
+Redaction targets: credential query parameters (``key=``, ``api_key=``, ``token=``, OAuth
+``code=``/``state=``...),
 Google/Groq/OpenAI/app API key formats, ``Authorization`` and ``X-API-Key`` header
 values, JWTs, session cookies, password/secret assignments, scrypt password hashes,
 and the exact values of secrets configured in the environment.
@@ -32,13 +33,16 @@ _SECRET_ENV_VARS = (
     "ASSEMBLYAI_API_KEY",
     "DEEPGRAM_API_KEY",
     "JWT_SECRET_KEY",
+    "GOOGLE_CLIENT_SECRET",
+    "YOUTUBE_PROXY_URL",  # may embed proxy credentials
     "SENTRY_DSN",
 )
 
 _PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # Credential-bearing query parameters: ?key=..., &api_key=..., &access_token=...
     (re.compile(
-        r"([?&](?:key|api[_-]?key|access[_-]?token|token|auth|password|secret|client[_-]?secret|sig|signature)=)"
+        r"([?&](?:key|api[_-]?key|access[_-]?token|id[_-]?token|refresh[_-]?token|token|auth|password|secret|"
+        r"client[_-]?secret|sig|signature|code|state|code[_-]?verifier)=)"
         r"[^&\s\"'#<>]+",
         re.IGNORECASE,
     ), r"\1" + REDACTED),

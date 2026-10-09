@@ -22,6 +22,7 @@ from models.transcript import (
 from services.audio.audio_service import AudioService
 from services.english_converter import english_converter
 from services.stt.hardware import detect_hardware
+from services.transcription.stt_gate import STTBusyError, stt_gate
 from utils.language_detector import LanguageDetector
 from utils.read_time import estimate_read_time
 from utils.text_cleaner import TextCleaner
@@ -90,6 +91,27 @@ class WhisperProvider(TranscriptProvider):
         channel_title: str | None = None,
         **kwargs: Any,  # noqa: ARG002 - TranscriptProvider interface
     ) -> TranscriptResult:
+        """Download audio and transcribe, holding a process-wide speech-to-text slot.
+
+        Raises:
+            AudioDownloadError / TranscriptionError: with ``error_code`` set when known
+                (e.g. BOT_BLOCKED, AUDIO_TOO_LONG, GROQ_RATE_LIMIT, STT_BUSY).
+        """
+        try:
+            with stt_gate.slot(video_id):
+                return self._download_and_transcribe(video_id, language, title, channel_title)
+        except STTBusyError as exc:
+            error = TranscriptionError(f"Speech-to-text busy for {video_id}: {exc}")
+            error.error_code = exc.error_code
+            raise error from exc
+
+    def _download_and_transcribe(
+        self,
+        video_id: str,
+        language: str | None,
+        title: str | None,
+        channel_title: str | None,
+    ) -> TranscriptResult:
         """Download audio and transcribe with Whisper.
 
         Pipeline:
@@ -138,7 +160,9 @@ class WhisperProvider(TranscriptProvider):
                 audio_path,
             )
         except Exception as exc:
-            raise AudioDownloadError(f"Failed to download audio for {video_id}: {exc}") from exc
+            error = AudioDownloadError(f"Failed to download audio for {video_id}: {exc}")
+            error.error_code = getattr(exc, "error_code", None)  # e.g. BOT_BLOCKED, AUDIO_TOO_LONG
+            raise error from exc
 
         # Dynamic context prompt for Whisper beam search
         prompt_parts: list[str] = []
@@ -171,7 +195,9 @@ class WhisperProvider(TranscriptProvider):
             except TypeError:
                 stt_result = self._stt.transcribe(str(audio_path), language=language)
         except Exception as exc:
-            raise TranscriptionError(f"Whisper transcription failed for {video_id}: {exc}") from exc
+            error = TranscriptionError(f"Whisper transcription failed for {video_id}: {exc}")
+            error.error_code = getattr(exc, "error_code", None)  # e.g. GROQ_RATE_LIMIT, GROQ_TIMEOUT
+            raise error from exc
         finally:
             if audio_path and not self._keep_audio:
                 self._audio_service.cleanup(audio_path)

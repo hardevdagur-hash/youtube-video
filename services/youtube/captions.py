@@ -10,6 +10,7 @@ from clients.youtube_transcript_client import (
     YouTubeTranscriptClient,
     YouTubeTranscriptClientError,
 )
+from services.transcript_failures import looks_bot_blocked
 
 logger = logging.getLogger(__name__)
 
@@ -98,13 +99,23 @@ class YouTubeCaptionsService:
                 f"Rate limited by YouTube when fetching captions: {e}",
                 error_code="CAPTIONS_RATE_LIMITED",
             ) from e
-        except YouTubeTranscriptClientError as e:
-            logger.warning("Error fetching captions for %s: %s", video_id, e)
-            raise CaptionsUnavailableError(
-                f"YouTube captions unavailable: {e}",
-                error_code="CAPTIONS_UNAVAILABLE",
-            ) from e
+        except CaptionsUnavailableError:
+            raise
         except Exception as e:
+            if looks_bot_blocked(str(e)):
+                # YouTube refuses this server (bot check / IP block), not this video:
+                # downloading the audio instead would only be blocked too.
+                logger.warning("YouTube blocked the caption request for %s: %s", video_id, e)
+                raise CaptionsUnavailableError(
+                    f"YouTube is blocking requests from this server: {e}",
+                    error_code="BOT_BLOCKED",
+                ) from e
+            if isinstance(e, YouTubeTranscriptClientError):
+                logger.warning("Error fetching captions for %s: %s", video_id, e)
+                raise CaptionsUnavailableError(
+                    f"YouTube captions unavailable: {e}",
+                    error_code="CAPTIONS_UNAVAILABLE",
+                ) from e
             logger.warning("Unexpected error fetching captions for %s: %s", video_id, e)
             raise CaptionsUnavailableError(
                 f"Could not retrieve YouTube captions: {e}",

@@ -30,7 +30,9 @@ import logging
 import os
 import re
 import secrets
+import time
 from dataclasses import dataclass, field
+from threading import Lock
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 
@@ -40,6 +42,18 @@ from starlette.responses import JSONResponse, Response
 
 from infrastructure.rate_limiter import SlidingWindowRateLimiter
 from infrastructure.request_context import user_var
+from security.google_oauth import SUBJECT_PREFIX as GOOGLE_SUBJECT_PREFIX
+from security.google_oauth import (
+    GoogleAuthError,
+    GoogleOAuthConfig,
+    GoogleOIDCClient,
+    OAuthStateStore,
+    check_account_policy,
+    domain_policy_violation,
+    states_match,
+    valid_state_format,
+)
+from security.google_users import GoogleUser, GoogleUserStore, GoogleUserStoreError
 from security.jwt_service import JWTConfig, JWTService
 from security.login_throttle import LoginThrottle
 from security.security_models import SecurityError
@@ -71,6 +85,9 @@ PUBLIC_ENDPOINTS = frozenset({
     ("GET", "/api/health"),
     ("POST", "/api/auth/login"),
     ("POST", "/api/auth/logout"),
+    ("GET", "/api/auth/providers"),
+    ("GET", "/api/auth/google/start"),
+    ("GET", "/api/auth/google/callback"),
 })
 
 # Operational endpoints restricted to admins.
@@ -86,6 +103,44 @@ _DEV_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
 
 class AuthConfigError(RuntimeError):
     """Raised when authentication configuration is unsafe for the environment."""
+
+
+class RevokedSessions:
+    """Session ids (``jti``) ended by logout, kept until the token would have expired anyway.
+
+    In memory, which matches the single-instance deployment; a restart forgets revocations,
+    so a session copied before logout would again be accepted until its own expiry
+    (at most SESSION_TTL_MINUTES). Bounded: when full, the entries closest to expiry go first.
+    """
+
+    def __init__(self, max_entries: int = 100_000) -> None:
+        self._max = max_entries
+        self._revoked: dict[str, float] = {}
+        self._lock = Lock()
+
+    def revoke(self, jti: str, expires_at: float) -> None:
+        now = time.time()
+        if expires_at <= now:
+            return
+        with self._lock:
+            self._purge(now)
+            self._revoked[jti] = expires_at
+            if len(self._revoked) > self._max:
+                for old in sorted(self._revoked, key=self._revoked.__getitem__)[: len(self._revoked) - self._max]:
+                    del self._revoked[old]
+
+    def is_revoked(self, jti: str) -> bool:
+        with self._lock:
+            expires_at = self._revoked.get(jti)
+        return expires_at is not None and expires_at > time.time()
+
+    def _purge(self, now: float) -> None:
+        for jti in [j for j, exp in self._revoked.items() if exp <= now]:
+            del self._revoked[jti]
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._revoked)
 
 
 # ---------------------------------------------------------------------------
@@ -147,9 +202,11 @@ _DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(16))
 
 @dataclass(frozen=True)
 class Principal:
-    subject: str
+    subject: str  # "<username>" | "key:<name>" | "google:<sub>" (also the job owner id)
     role: str
-    auth_method: str  # "api_key" | "session"
+    auth_method: str  # "api_key" | "session" (browser cookie; CSRF-checked, whatever the provider)
+    provider: str = "password"  # how the session was obtained: "password" | "google" | "api_key"
+    display_name: str = ""
 
     @property
     def is_admin(self) -> bool:
@@ -173,10 +230,17 @@ class AuthSettings:
     login_free_failures: int = 3  # per (IP, username) before backoff starts
     login_backoff_base_seconds: float = 2.0
     login_max_backoff_seconds: int = 900
+    google: GoogleOAuthConfig = field(default_factory=GoogleOAuthConfig)
+    google_rate_per_minute: int = 20  # sign-in starts + callbacks per client IP
 
     @property
     def is_production(self) -> bool:
         return self.app_env == "production"
+
+    @property
+    def google_enabled(self) -> bool:
+        """Google sign-in is offered only when its configuration is complete and valid."""
+        return self.google.configured and not self.google.problems(self.is_production)
 
     @property
     def trusted_origins(self) -> frozenset[str]:
@@ -215,6 +279,8 @@ class AuthSettings:
             costly_rate_per_minute=_int(env, "COSTLY_RATE_LIMIT_PER_MINUTE", 20, 1, 10_000),
             login_rate_per_minute=_int(env, "LOGIN_RATE_LIMIT_PER_MINUTE", 5, 1, 1_000),
             login_user_rate_per_minute=_int(env, "LOGIN_USER_RATE_LIMIT_PER_MINUTE", 30, 1, 10_000),
+            google=GoogleOAuthConfig.from_env(env),
+            google_rate_per_minute=_int(env, "GOOGLE_AUTH_RATE_LIMIT_PER_MINUTE", 20, 1, 1_000),
         )
 
     def problems(self) -> list[str]:
@@ -231,8 +297,9 @@ class AuthSettings:
                 issues.append(
                     f"CORS_ORIGINS must contain only https://host[:port] origins in production: {shown}"
                 )
-        if not self.users and not self.api_keys:
-            issues.append("no credentials configured: set AUTH_USERS and/or API_KEYS")
+        issues.extend(self.google.problems(self.is_production))
+        if not self.users and not self.api_keys and not self.google_enabled:
+            issues.append("no credentials configured: set AUTH_USERS, API_KEYS and/or Google sign-in")
         return issues
 
     def validate(self) -> None:
@@ -304,7 +371,9 @@ def _parse_api_keys(raw: str) -> list[tuple[str, str, str]]:
 class WebAuthenticator:
     """Verifies credentials and issues session tokens."""
 
-    def __init__(self, config: AuthSettings) -> None:
+    def __init__(self, config: AuthSettings, google_users: GoogleUserStore | None = None) -> None:
+        # Persistent Google accounts outlive configuration reloads (configure()).
+        self.google_users = google_users
         self.configure(config)
 
     def configure(self, config: AuthSettings) -> None:
@@ -325,6 +394,78 @@ class WebAuthenticator:
             backoff_base_seconds=config.login_backoff_base_seconds,
             max_backoff_seconds=config.login_max_backoff_seconds,
         )
+        self.google_client = GoogleOIDCClient(config.google) if config.google_enabled else None
+        self.revoked_sessions = RevokedSessions()
+        self.oauth_states = OAuthStateStore()
+        self.oauth_limiter = SlidingWindowRateLimiter(config.google_rate_per_minute, 60.0)
+
+    # -- Google ---------------------------------------------------------------
+
+    @property
+    def google_enabled(self) -> bool:
+        return (
+            self.config.google_enabled
+            and self.google_client is not None
+            and self.google_users is not None
+            and self.google_users.healthy
+        )
+
+    def google_principal(self, user: GoogleUser) -> Principal:
+        """Role comes only from server configuration (GOOGLE_ADMIN_SUBJECTS); default ``user``."""
+        role = ROLE_ADMIN if user.sub in self.config.google.admin_subjects else ROLE_USER
+        return Principal(
+            subject=user.user_id, role=role, auth_method="session",
+            provider="google", display_name=user.email or user.display_name,
+        )
+
+    def _google_session_principal(self, subject: str) -> Principal | None:
+        if not self.google_enabled or self.google_users is None:
+            return None  # Google sign-in switched off => its sessions are revoked too
+        user = self.google_users.get(subject[len(GOOGLE_SUBJECT_PREFIX):])
+        if user is None or user.disabled:
+            return None
+        if domain_policy_violation(user.hosted_domain, user.email_domain, self.config.google):
+            return None  # a tightened domain policy revokes existing sessions immediately
+        return self.google_principal(user)
+
+    def complete_google_login(
+        self, *, state: str | None, cookie_state: str | None, code: str | None, error: str | None,
+    ) -> tuple[Principal, bool]:
+        """Run the OAuth callback (blocking: calls Google). Returns ``(principal, created)``.
+
+        Raises ``GoogleAuthError`` for every refusal; nothing from the browser except the
+        authorization code and state is trusted, and both are single use.
+        """
+        if not self.google_enabled or self.google_client is None or self.google_users is None:
+            raise GoogleAuthError("unavailable", "Google sign-in is not configured")
+        # Consume the state first, even on errors, so it can never be replayed.
+        pending = self.oauth_states.consume(state) if valid_state_format(state) else None
+        if error:
+            raise GoogleAuthError(
+                "cancelled" if error == "access_denied" else "provider_error",
+                f"Google returned error={error[:64]!r}",
+            )
+        if pending is None or not states_match(cookie_state, state):
+            raise GoogleAuthError("invalid_state", "unknown, expired, reused or unbound state")
+        if not code or len(code) > 2048:
+            raise GoogleAuthError("invalid_request", "missing or oversized authorization code")
+
+        id_token = self.google_client.exchange_code(code, pending.code_verifier)
+        identity = self.google_client.verify_id_token(id_token, pending.nonce)
+        check_account_policy(identity, self.config.google)
+        domain = identity.hosted_domain or identity.email_domain
+
+        existing = self.google_users.get(identity.sub)
+        if existing is not None and existing.disabled:
+            raise GoogleAuthError("disabled", "account is disabled")
+        try:
+            user, created = self.google_users.record_login(
+                identity.sub, identity.email, identity.name,
+                account_domain=domain, hosted_domain=identity.hosted_domain,
+            )
+        except GoogleUserStoreError as exc:
+            raise GoogleAuthError("provisioning_failed", str(exc)) from exc
+        return self.google_principal(user), created
 
     # -- API keys -----------------------------------------------------------
 
@@ -335,7 +476,7 @@ class WebAuthenticator:
         match: Principal | None = None
         for name, role, digest in self.config.api_keys:  # no early exit: constant work
             if hmac.compare_digest(candidate, digest):
-                match = Principal(subject=f"key:{name}", role=role, auth_method="api_key")
+                match = Principal(subject=f"key:{name}", role=role, auth_method="api_key", provider="api_key")
         return match
 
     # -- Passwords and sessions --------------------------------------------
@@ -362,11 +503,32 @@ class WebAuthenticator:
             return None
         except Exception:  # malformed tokens from any JWT backend
             return None
+        jti = claims.get("jti")
+        if isinstance(jti, str) and self.revoked_sessions.is_revoked(jti):
+            return None  # signed out
         subject = claims.get("sub")
+        if isinstance(subject, str) and subject.startswith(GOOGLE_SUBJECT_PREFIX):
+            return self._google_session_principal(subject)
         record = self.config.users.get(subject) if isinstance(subject, str) else None
         if record is None:  # user removed from configuration => session revoked
             return None
         return Principal(subject=subject, role=record[0], auth_method="session")
+
+    def revoke_session(self, token: str | None) -> bool:
+        """End the session ``token`` server-side (logout). Returns True if it was revoked."""
+        if not token or len(token) > 4096:
+            return False
+        try:
+            claims = self._jwt.verify_token(token, expected_type="access")
+        except SecurityError:
+            return False  # expired or invalid: nothing to revoke
+        except Exception:
+            return False
+        jti, exp = claims.get("jti"), claims.get("exp")
+        if not isinstance(jti, str) or not isinstance(exp, int | float):
+            return False  # issued before session ids existed; it still expires on its own
+        self.revoked_sessions.revoke(jti, float(exp))
+        return True
 
     def authenticate_request(self, request: Request) -> Principal | None:
         api_key = request.headers.get(API_KEY_HEADER)

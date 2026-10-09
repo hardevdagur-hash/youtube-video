@@ -8,11 +8,13 @@ metadata, and auto-select the best auto-generated transcript.
 import logging
 
 from clients.youtube_transcript_client import (
+    CaptionRequestFailedError,
     NoTranscriptFoundError,
     TooManyRequestsError,
     TranscriptsDisabledError,
     VideoUnavailableError,
     YouTubeTranscriptClient,
+    is_request_failure,
 )
 from interfaces.transcript_provider import TranscriptProvider
 from models.transcript import (
@@ -20,6 +22,7 @@ from models.transcript import (
     TranscriptResult,
     TranscriptSource,
 )
+from services.transcript_failures import looks_bot_blocked
 from utils.language_detector import LanguageDetector
 from utils.read_time import estimate_read_time
 from utils.text_cleaner import TextCleaner
@@ -84,6 +87,9 @@ class AutoTranscriptProvider(TranscriptProvider):
             raise
         except Exception as exc:
             logger.warning("Auto transcript fetch failed for %s: %s", video_id, exc)
+            if is_request_failure(exc) or looks_bot_blocked(str(exc)):
+                # The request failed: says nothing about whether captions exist.
+                raise CaptionRequestFailedError(f"Auto transcript unavailable: {exc}") from exc
             raise NoTranscriptFoundError(f"Auto transcript unavailable: {exc}") from exc
 
         if not raw_segments:

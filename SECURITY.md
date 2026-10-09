@@ -10,8 +10,10 @@ public issue). Include the affected endpoint or file, reproduction steps and imp
 | Control | Where | Behaviour |
 | --- | --- | --- |
 | Authentication | `security/web_auth.py` (`AuthMiddleware`) | Deny by default on `/api/*`; session cookie or `X-API-Key` |
+| Google sign-in | `security/google_oauth.py`, `security/google_users.py` | OIDC code flow: single-use state bound to an HttpOnly cookie, PKCE, nonce, server-side code exchange, ID-token signature/iss/aud/azp/exp checks, verified email, account policy (fail-closed): Workspace domains require a matching `hd` claim, personal accounts only for explicitly listed email domains, identity = Google `sub`; role `user` unless the sub is in `GOOGLE_ADMIN_SUBJECTS`; issues the same session cookie as password login ([docs/GOOGLE_SIGN_IN.md](docs/GOOGLE_SIGN_IN.md)) |
 | Authorization | `webapp/main.py` (`can_access_owned`) | Jobs belong to their creator; admins see all; others get "not found" |
-| CSRF | `WebAuthenticator.origin_allowed` | Cookie-authenticated unsafe methods need a trusted/same-host `Origin` |
+| CSRF | `WebAuthenticator.origin_allowed`, `SameSite=Strict` cookie | Cookie-authenticated unsafe methods with an `Origin` (or `Referer`) must come from a trusted/same host; requests with neither header (non-browser clients) rely on the `SameSite=Strict` session cookie |
+| Indexing | `X-Robots-Tag` (app + nginx), `/robots.txt`, `<meta name="robots">` | Every response is `noindex, nofollow`; access control itself stays server-side |
 | CORS | `cors_options`, `CORS_ORIGINS` | Explicit origins only; `*` refused in production; same-origin needs none |
 | Rate limits | `AuthMiddleware`, nginx `limit_req` | Per user (`API_RATE_LIMIT_PER_MINUTE`, `COSTLY_RATE_LIMIT_PER_MINUTE`), per IP for login and at nginx |
 | Resource caps | `config/settings.py` | `MAX_VIDEOS_PER_JOB`, `MAX_VIDEOS_SYNC_EXPORT`, `MAX_ACTIVE_JOBS[_PER_USER]`, `MAX_CONCURRENT_SYNC_CHANNEL_RUNS` |
@@ -25,11 +27,13 @@ public issue). Include the affected endpoint or file, reproduction steps and imp
 ## Authentication model
 
 Every `/api/*` request is denied unless it carries valid credentials. The only
-exceptions are `GET /api/health` (coarse status only) and `POST /api/auth/login|logout`.
+exceptions are `GET /api/health` (coarse status only), `POST /api/auth/login|logout`,
+`GET /api/auth/providers` (which sign-in methods are enabled) and the Google sign-in
+redirects `GET /api/auth/google/start|callback`.
 
 | Client | Credential | How it is configured |
 | ------ | ---------- | -------------------- |
-| Browser (SPA) | `session` cookie (HttpOnly, SameSite=Strict, Secure in production), issued by `POST /api/auth/login` | `AUTH_USERS=username:role:scrypt-hash` |
+| Browser (SPA) | `session` cookie (HttpOnly, SameSite=Strict, Secure in production), issued by `POST /api/auth/login` or the Google callback | `AUTH_USERS=username:role:scrypt-hash` and/or `GOOGLE_*` ([docs/GOOGLE_SIGN_IN.md](docs/GOOGLE_SIGN_IN.md)) |
 | Scripts / services | `X-API-Key: ysk_...` header | `API_KEYS=name:role:sha256` |
 
 - Roles: `admin` (operational endpoints `/api/transcript/metrics` and
@@ -42,6 +46,10 @@ exceptions are `GET /api/health` (coarse status only) and `POST /api/auth/login|
   The `.env.backup-*` file it leaves contains the previous secrets; delete it once verified.
 - Removing a user from `AUTH_USERS` revokes their sessions on the next request.
   Rotating `JWT_SECRET_KEY` revokes all sessions.
+- Sign out (`POST /api/auth/logout`) also revokes that session server-side by its id
+  (`jti`). The revocation list is in memory (single instance): after an app restart a
+  session copied before sign-out is accepted again until it expires
+  (`SESSION_TTL_MINUTES`, default 8 h). Rotate `JWT_SECRET_KEY` to end all sessions.
 - `APP_ENV` must be exactly `development` (the default) or `production`; any other
   value (e.g. `prod`, `staging`) stops startup instead of silently getting development rules.
 - With `APP_ENV=production` the app refuses to start when `JWT_SECRET_KEY` is

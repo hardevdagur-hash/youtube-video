@@ -4,37 +4,24 @@
 #   scripts/rollback.sh            -> the image deployed before the current one
 #   scripts/rollback.sh <tag>      -> a specific transcript-app:<tag>
 #
+# The target becomes transcript-app:current, so later "docker compose up -d" runs keep it.
 # To also roll back data, restore a backup with scripts/restore.sh.
 set -Eeuo pipefail
 
 cd "$(dirname "$0")/.."
-STATE_DIR=".deploy"
-HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-180}"
-
-log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
-die() { log "ERROR: $*" >&2; exit 1; }
+# shellcheck source=scripts/lib/common.sh
+. scripts/lib/common.sh
 
 target="${1:-$(cat "$STATE_DIR/previous" 2>/dev/null || true)}"
 current="$(cat "$STATE_DIR/current" 2>/dev/null || true)"
 [ -n "$target" ] || die "no previous deployment recorded; pass an image tag (docker images transcript-app)"
+[ "$target" != "$CURRENT_TAG" ] || die "pass the version tag itself (docker images transcript-app), not '${CURRENT_TAG}'"
 docker image inspect "transcript-app:${target}" >/dev/null 2>&1 || die "image transcript-app:${target} not found"
 
 log "Rolling back from ${current:-unknown} to ${target}"
 IMAGE_TAG="$target" docker compose up -d --remove-orphans
 
-cid="$(docker compose ps -q app)"
-waited=0
-status=""
-while [ "$waited" -lt "$HEALTH_TIMEOUT" ]; do
-    status="$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$cid" 2>/dev/null || true)"
-    [ "$status" = "healthy" ] && break
-    [ "$status" = "unhealthy" ] && break
-    sleep 3
-    waited=$((waited + 3))
-done
-[ "$status" = "healthy" ] || die "transcript-app:${target} is not healthy (status: ${status:-unknown})"
+wait_app_healthy || die "transcript-app:${target} is not healthy; check 'docker compose logs app'"
 
-mkdir -p "$STATE_DIR"
-[ -n "$current" ] && printf '%s\n' "$current" > "$STATE_DIR/previous"
-printf '%s\n' "$target" > "$STATE_DIR/current"
-log "Rolled back to transcript-app:${target}"
+promote_image "$target"
+log "Rolled back to transcript-app:${target} (now transcript-app:${CURRENT_TAG})"

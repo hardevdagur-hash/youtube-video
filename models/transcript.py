@@ -46,6 +46,7 @@ class PipelineStep(BaseModel):
     status: str = Field(..., description="pending | running | ok | error | skipped")
     detail: str = Field(default="", description="Optional detail message")
     duration_seconds: float | None = Field(default=None)
+    error_type: str | None = Field(default=None, description="Failure classification, e.g. NO_CAPTIONS, BOT_BLOCKED")
 
 
 class TranscriptResult(BaseModel):
