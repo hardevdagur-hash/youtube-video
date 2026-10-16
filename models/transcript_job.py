@@ -41,6 +41,9 @@ class TranscriptVideoItem(BaseModel):
     method: str | None = None  # caption | speech_to_text
     error_code: str | None = None
     error_message: str | None = None
+    # Set when the requested Simple English / Simple Hindi rewrite failed and ``transcript``
+    # holds the original text instead (client-safe message; details are in the server log).
+    translation_error: str | None = None
     attempt_count: int = 0
     retryable: bool = False
     next_retry_at: str | None = None

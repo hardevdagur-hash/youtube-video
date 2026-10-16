@@ -115,7 +115,8 @@ class Settings:
 
         # Groq: speech-to-text fallback and Simple English / Simple Hindi rewriting
         self.groq_whisper_model: str = _get_env("GROQ_WHISPER_MODEL", "whisper-large-v3")
-        self.groq_translation_model: str = _get_env("GROQ_TRANSLATION_MODEL", "llama-3.3-70b-versatile")
+        # llama-3.3-70b-versatile was retired by Groq (404 model_not_found); gpt-oss-120b replaces it.
+        self.groq_translation_model: str = _get_env("GROQ_TRANSLATION_MODEL", "openai/gpt-oss-120b")
         self.groq_timeout_seconds: int = _env_int("GROQ_TIMEOUT_SECONDS", 120, 5, 900)
         self.groq_max_retries: int = _env_int("GROQ_MAX_RETRIES", 3, 1, 10)
 
@@ -177,6 +178,9 @@ class Settings:
         # Synchronous channel requests hold an HTTP connection for the whole run: keep them small.
         self.max_videos_sync_export: int = _env_int("MAX_VIDEOS_SYNC_EXPORT", 25, 1, 200)
         self.max_concurrent_sync_channel_runs: int = _env_int("MAX_CONCURRENT_SYNC_CHANNEL_RUNS", 2, 1, 20)
+        # In-flight synchronous transcript requests (single video, sync channel, CSV export)
+        # per signed-in user: bounds what one account can spend on captions/STT at once.
+        self.max_inflight_transcripts_per_user: int = _env_int("MAX_INFLIGHT_TRANSCRIPTS_PER_USER", 2, 1, 20)
         # Running background jobs (each holds YouTube/Groq capacity for its whole run)
         self.max_active_jobs: int = _env_int("MAX_ACTIVE_JOBS", 4, 1, 50)
         self.max_active_jobs_per_user: int = _env_int("MAX_ACTIVE_JOBS_PER_USER", 2, 1, 50)

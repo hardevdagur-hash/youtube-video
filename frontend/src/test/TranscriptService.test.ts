@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { transcriptService } from '../services/TranscriptService';
-import { getLanguageLabel } from '../types';
+import { getLanguageLabel, simpleModeLabel } from '../types';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -65,6 +65,14 @@ describe('TranscriptService', () => {
 
   it('builds an encoded job download URL', () => {
     expect(transcriptService.getJobDownloadUrl('abcdef012345')).toBe('/api/transcript/jobs/abcdef012345/download');
+  });
+});
+
+describe('simpleModeLabel', () => {
+  it('labels the rewritten view after the job output language', () => {
+    expect(simpleModeLabel('hi')).toBe('Simple Hindi');
+    expect(simpleModeLabel('en')).toBe('Simple English');
+    expect(simpleModeLabel(undefined)).toBe('Simple English');
   });
 });
 

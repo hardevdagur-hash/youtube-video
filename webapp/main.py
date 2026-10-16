@@ -549,6 +549,40 @@ def _transcript_error(rid: str, code: str | None) -> JSONResponse:
     )
 
 
+_inflight_by_user: dict[str, int] = {}
+
+
+def _limit_user_inflight(request_param: str = "http_request"):
+    """Reject (429 USER_BUSY) a user's synchronous transcript request beyond
+    MAX_INFLIGHT_TRANSCRIPTS_PER_USER in flight.
+
+    Single-video, sync-channel and CSV-export requests can each spend caption fetches
+    and speech-to-text credits; this caps what one account can run at once (the rate
+    limiter only bounds how often requests start). ``request_param`` names the route's
+    ``Request`` argument. Counters are only touched on the event loop, so no lock is needed.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            principal = _principal(kwargs[request_param])
+            key = principal.subject if principal is not None else "anonymous"
+            running = _inflight_by_user.get(key, 0)
+            if running >= settings.max_inflight_transcripts_per_user:
+                logger.info("Transcript request rejected for %s: %d already in flight", key, running)
+                return _transcript_error(current_request_id(), "USER_BUSY")
+            _inflight_by_user[key] = running + 1
+            try:
+                return await func(*args, **kwargs)
+            finally:
+                remaining = _inflight_by_user.get(key, 1) - 1
+                if remaining > 0:
+                    _inflight_by_user[key] = remaining
+                else:
+                    _inflight_by_user.pop(key, None)
+        return wrapper
+    return decorator
+
+
 def _normalize_output_mode(raw: str | None, default: str) -> str | None:
     """Canonical output mode ('original' | 'en' | 'hi') or None when unsupported."""
     mode = (raw or default).lower().strip()
@@ -578,16 +612,21 @@ _OUTPUT_MODE_LABELS = {"en": "Simple English", "hi": "Simple Hindi"}
 
 async def _localized_transcript(
     video_id: str, raw_text: str, source_language: str | None, output_language: str | None, rid: str,
-) -> tuple[str, str | None, bool]:
-    """Return ``(text, language_label, fell_back)`` for the requested output mode.
+) -> tuple[str, str | None, str | None]:
+    """Return ``(text, language_label, translation_error)`` for the requested output mode.
 
     'original' always returns the verbatim source text. 'en' / 'hi' go through the
     explicit TranslationService; on failure the original text is returned labelled
-    with its real language (never mislabelled as English).
+    with its real language (never mislabelled as English) and ``translation_error``
+    is a client-safe reason (None when nothing fell back).
     """
+    from services.jobs.transcript_job_manager import _translation_error_code
+    from services.public_errors import public_message
+
     mode = (output_language or "original").lower().strip()
     if mode in ("original", "original_spoken") or not raw_text:
-        return raw_text, source_language, False
+        return raw_text, source_language, None
+    code = "TRANSLATION_FAILED"
     try:
         _, trans_svc = _get_unified_services()
         result = await _transcript_work(
@@ -599,14 +638,16 @@ async def _localized_transcript(
         )
         text = (result or {}).get("transcript") or ""
         if text:
-            return text, _OUTPUT_MODE_LABELS.get(mode, mode), False
+            return text, _OUTPUT_MODE_LABELS.get(mode, mode), None
     except Exception as exc:
         logger.warning("[%s] Translation of %s to %s failed: %s; returning original transcript", rid, video_id, mode, exc)
-    return raw_text, source_language or "Original (untranslated)", True
+        code = _translation_error_code(exc)
+    return raw_text, source_language or "Original (untranslated)", public_message(code)
 
 
 @app.post("/api/transcript")
-async def api_transcript_unified(request: UnifiedTranscriptRequest):
+@_limit_user_inflight()
+async def api_transcript_unified(request: UnifiedTranscriptRequest, http_request: Request):  # noqa: ARG001  (read by _limit_user_inflight)
     """Unified transcript acquisition and translation endpoint.
 
     Pipeline:
@@ -886,8 +927,10 @@ def _limit_sync_channel_runs(applies=lambda _call_kwargs: True):
 
 
 @app.get("/api/channel/{handle}/transcripts")
+@_limit_user_inflight()
 @_limit_sync_channel_runs()
 async def api_channel_transcripts(
+    http_request: Request,  # noqa: ARG001  (read by _limit_user_inflight)
     handle: str = PathParam(pattern=_HANDLE_PATTERN),
     limit: int = Query(settings.max_videos_sync_export, ge=1, le=settings.max_videos_sync_export),
     concurrency: int = Query(5, ge=1, le=_MAX_CONCURRENCY),
@@ -970,7 +1013,7 @@ async def api_channel_transcripts(
                     )
                     if res.success and (res.plain_text or res.paragraph_text):
                         raw_text = getattr(res, "raw_transcript", "") or (res.plain_text or res.paragraph_text or "")
-                        out_text, out_label, _ = await _localized_transcript(
+                        out_text, out_label, translation_error = await _localized_transcript(
                             video_id, raw_text, res.source_language or res.language, output_language, rid,
                         )
                         return {
@@ -987,6 +1030,7 @@ async def api_channel_transcripts(
                             "status": "success",
                             "transcript": out_text,
                             "raw_transcript": raw_text,
+                            "translation_error": translation_error,
                             "source": "youtube",
                             "method": "caption",
                             "error_code": None,
@@ -1008,7 +1052,7 @@ async def api_channel_transcripts(
                         )
                         if w_res.success and (w_res.plain_text or w_res.paragraph_text):
                             raw_text = getattr(w_res, "raw_transcript", "") or (w_res.plain_text or w_res.paragraph_text or "")
-                            out_text, out_label, _ = await _localized_transcript(
+                            out_text, out_label, translation_error = await _localized_transcript(
                                 video_id, raw_text, w_res.source_language or w_res.language, output_language, rid,
                             )
                             return {
@@ -1025,6 +1069,7 @@ async def api_channel_transcripts(
                                 "status": "success",
                                 "transcript": out_text,
                                 "raw_transcript": raw_text,
+                                "translation_error": translation_error,
                                 "source": "whisper",
                                 "method": "speech_to_text",
                                 "error_code": None,
@@ -1163,6 +1208,13 @@ async def api_start_channel_transcript_job(
         # 0 means "all eligible videos", bounded by the configured per-job cap
         eff_max = min(eff_max or settings.max_videos_per_job, settings.max_videos_per_job)
         eff_refresh = req.force_refresh if req else force_refresh
+        if eff_refresh and not (principal is not None and principal.is_admin):
+            # Bypassing the transcript cache re-spends captions/STT for every video.
+            return error_response(
+                message="force_refresh is restricted to administrators.",
+                status_code=403,
+                error_code="FORBIDDEN",
+            )
         eff_pub_after = req.published_after if req and req.published_after else published_after
         eff_pub_before = req.published_before if req and req.published_before else published_before
         eff_out_lang = _normalize_output_mode(req.output_language if req else output_language, "en") or "en"
@@ -1194,20 +1246,30 @@ async def api_start_channel_transcript_job(
 
 
 @app.get("/api/transcript/jobs/{job_id}")
-async def api_get_transcript_job_status(request: Request, job_id: str = PathParam(pattern=_JOB_ID_PATTERN)):
-    """Poll progress, counters, and video results for a background job."""
-    from services.jobs.transcript_job_manager import transcript_job_manager
-    job = transcript_job_manager.get_job(job_id)
+async def api_get_transcript_job_status(
+    request: Request,
+    job_id: str = PathParam(pattern=_JOB_ID_PATTERN),
+    view: str = Query("full", pattern=r"^(full|progress)$"),
+):
+    """Progress, counters, and video results for a background job.
+
+    ``view=progress`` is the cheap polling view: per-video status with a short transcript
+    preview instead of every transcript body. ``view=full`` (default) returns everything.
+    """
+    from services.jobs.transcript_job_manager import job_progress_summary, transcript_job_manager
+    job = await transcript_job_manager.aget_job(job_id)
     if not job or not _can_access_transcript_job(request, job):
         return error_response(message=f"Job '{job_id}' not found", status_code=404)
-    return success_response(data=job.model_dump())
+    if view == "progress":
+        return success_response(data=job_progress_summary(job))
+    return success_response(data=await _to_thread(job.model_dump))
 
 
 @app.post("/api/transcript/jobs/{job_id}/cancel")
 async def api_cancel_transcript_job(request: Request, job_id: str = PathParam(pattern=_JOB_ID_PATTERN)):
     """Cancel a running background transcript job."""
     from services.jobs.transcript_job_manager import transcript_job_manager
-    job = transcript_job_manager.get_job(job_id)
+    job = await transcript_job_manager.aget_job(job_id)
     if not job or not _can_access_transcript_job(request, job):
         return error_response(message=f"Job '{job_id}' could not be cancelled or not found", status_code=400)
     cancelled = await transcript_job_manager.cancel_job(job_id)
@@ -1220,7 +1282,7 @@ async def api_cancel_transcript_job(request: Request, job_id: str = PathParam(pa
 async def api_resume_transcript_job(request: Request, job_id: str = PathParam(pattern=_JOB_ID_PATTERN)):
     """Resume a pending, paused, or rate-limited background job."""
     from services.jobs.transcript_job_manager import JobLimitError, transcript_job_manager
-    existing = transcript_job_manager.get_job(job_id)
+    existing = await transcript_job_manager.aget_job(job_id)
     if not existing or not _can_access_transcript_job(request, existing):
         return error_response(message=f"Job '{job_id}' not found", status_code=404)
     try:
@@ -1243,10 +1305,10 @@ async def api_download_transcript_job(
 ):
     """Download CSV for a transcript background job with exact mode representation."""
     from services.jobs.transcript_job_manager import transcript_job_manager
-    job = transcript_job_manager.get_job(job_id)
+    job = await transcript_job_manager.aget_job(job_id)
     if not job or not _can_access_transcript_job(request, job):
         return error_response(message=f"Job '{job_id}' not found", status_code=404)
-    csv_content = transcript_job_manager.generate_csv(job_id, include_audit_columns=audit)
+    csv_content = await transcript_job_manager.agenerate_csv(job_id, include_audit_columns=audit)
     clean_handle = _safe_filename_part((job.channel_handle or "channel").lstrip("@"))
     filename = f"{clean_handle}_transcripts_{job_id}.csv"
     encoded = csv_content.encode("utf-8-sig")
@@ -1394,8 +1456,9 @@ def _resolve_video_id(url: str) -> str | None:
 
 
 @app.post("/api/transcript/export")
+@_limit_user_inflight()
 @_limit_sync_channel_runs(applies=lambda call_kwargs: bool(call_kwargs["req"].channel_handle))
-async def api_transcript_csv_export(req: TranscriptExportRequest):
+async def api_transcript_csv_export(req: TranscriptExportRequest, http_request: Request):  # noqa: ARG001  (read by _limit_user_inflight)
     """Export transcripts as CSV for a single video or entire channel.
 
     Accepts either a video_url or a channel_handle. Returns a downloadable
@@ -1566,11 +1629,16 @@ async def api_transcript_csv_export(req: TranscriptExportRequest):
                 logger.warning("[%s] Metadata fetch failed for %s: %s", rid, video_id, exc)
 
             # Fetch transcript (captions first, then whisper fallback)
+            # Defaults describe a failed fetch; every field is bound even if the fetch raises.
+            transcript = None
+            raw_text = ""
             transcript_text = ""
             status = "failed"
             source = None
             method = None
             language = "en"
+            source_lang = None
+            source_code = None
             error_code = None
             error_message = None
             try:
@@ -1614,11 +1682,11 @@ async def api_transcript_csv_export(req: TranscriptExportRequest):
                 "duration": duration,
                 "language": language,
                 "output_language_label": language if status == "success" else None,
-                "source_language": source_lang if 'source_lang' in locals() else language,
-                "source_language_code": source_code if 'source_code' in locals() else "en",
+                "source_language": source_lang or language,
+                "source_language_code": source_code or "en",
                 "status": status,
                 "transcript": transcript_text,
-                "raw_transcript": getattr(transcript, "raw_transcript", "") if transcript else "",
+                "raw_transcript": raw_text,
                 "source": source,
                 "method": method,
                 "error_code": error_code,
@@ -1628,7 +1696,8 @@ async def api_transcript_csv_export(req: TranscriptExportRequest):
             logger.info("[%s] CSV export: 1 row for video %s", rid, video_id)
 
         # Generate CSV
-        csv_content = _build_csv_rows(
+        csv_content = await _to_thread(
+            _build_csv_rows,
             videos_data,
             output_language=req.output_language,
             include_audit_columns=req.include_audit_columns,

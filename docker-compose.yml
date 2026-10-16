@@ -28,6 +28,9 @@ services:
       TRUSTED_PROXIES: 172.28.0.10
     volumes:
       - transcript_data:/app/data
+    # Immutable root filesystem: the app writes only to the data volume and the /tmp tmpfs
+    # (yt-dlp/HTTP caches via XDG_CACHE_HOME=/tmp/.cache; no .pyc files, no log files).
+    read_only: true
     tmpfs:
       - /tmp:size=512m,mode=1777
     expose:
@@ -74,6 +77,16 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+    # The master process starts as root to bind 80/443 and create its cache/temp dirs,
+    # then workers switch to the nginx user; nothing else is needed.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+      - NET_BIND_SERVICE
     deploy:
       resources:
         limits:

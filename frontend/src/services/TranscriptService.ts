@@ -81,11 +81,15 @@ class TranscriptService {
     return body.data;
   }
 
-  async getJobProgress(jobId: string): Promise<TranscriptJobProgressData> {
-    const resp = await fetch(`${API_BASE}/transcript/jobs/${encodeURIComponent(jobId)}`);
+  // view 'progress' omits transcript bodies (cheap to poll); 'full' returns every transcript.
+  async getJobProgress(jobId: string, view: 'progress' | 'full' = 'full'): Promise<TranscriptJobProgressData> {
+    const query = view === 'progress' ? '?view=progress' : '';
+    const resp = await fetch(`${API_BASE}/transcript/jobs/${encodeURIComponent(jobId)}${query}`);
     if (!resp.ok) {
       const body = await resp.json().catch(() => null);
-      throw new Error(body?.message || `Failed to get job progress (${resp.status})`);
+      const err = new Error(body?.message || `Failed to get job progress (${resp.status})`);
+      (err as any).status = resp.status;
+      throw err;
     }
     const body = await resp.json();
     return body.data;

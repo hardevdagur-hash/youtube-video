@@ -28,10 +28,13 @@ from services.csv_safety import safe_csv_row
 from services.public_errors import public_message
 from services.transcript_failures import TRANSIENT_STT_CODES, YOUTUBE_BLOCK_CODES
 from services.transcript_limiter import transcript_limiter
+from utils.atomic_file import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
 _JOB_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+# While a job waits out a rate-limit cooldown, the countdown is checkpointed at most this often.
+_COOLDOWN_CHECKPOINT_INTERVAL = 15.0
 
 # Failures that say nothing about the video: the item stays resumable ("temporary_error").
 RETRYABLE_ITEM_CODES = TRANSIENT_STT_CODES | YOUTUBE_BLOCK_CODES | {"NETWORK_ERROR", "TIMEOUT"}
@@ -64,6 +67,15 @@ def _log_job_outcome(job: TranscriptJobProgress) -> None:
             "videos_total": job.eligible_videos, "videos_success": job.successful, "videos_failed": job.failed,
         },
     )
+
+
+def _translation_error_code(exc: BaseException) -> str:
+    """Public code for a failed Simple English / Simple Hindi rewrite."""
+    from services.transcription.groq import GroqAuthError
+
+    if isinstance(exc, GroqAuthError) or getattr(exc, "error_code", None) == "TRANSLATION_UNAVAILABLE":
+        return "TRANSLATION_UNAVAILABLE"  # missing key or model: a server configuration problem
+    return "TRANSLATION_FAILED"
 
 
 def parse_date_boundary(date_str: str | None, is_end_of_day: bool = False) -> datetime | None:
@@ -139,6 +151,8 @@ class TranscriptJobManager:
         self._recent: OrderedDict[str, TranscriptJobProgress] = OrderedDict()
         self._tasks: dict[str, asyncio.Task] = {}
         self._lock = asyncio.Lock()
+        # Orders off-loop checkpoint writes per job, so an older snapshot never lands last.
+        self._save_locks: dict[str, asyncio.Lock] = {}
         self._jobs_dir: Path = Path(jobs_dir) if jobs_dir else settings.transcript_jobs_dir
         self._jobs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -251,6 +265,9 @@ class TranscriptJobManager:
             if self._tasks.get(job_id) is not done:
                 return  # superseded by a resume that started a new task
             self._tasks.pop(job_id, None)
+            lock = self._save_locks.get(job_id)
+            if lock is not None and not lock.locked():
+                self._save_locks.pop(job_id, None)
             finished = self._jobs.pop(job_id, None)
             if finished is not None:
                 self._remember(finished)
@@ -272,22 +289,39 @@ class TranscriptJobManager:
         path = (root / f"{job_id}{suffix}").resolve()
         return path if path.is_relative_to(root) else None
 
-    def _save_checkpoint(self, job: TranscriptJobProgress) -> None:
-        """Persist current job progress to disk atomically."""
+    def _stamp_checkpoint(self, job: TranscriptJobProgress) -> Path | None:
+        """Checkpoint target for ``job`` with its bookkeeping fields updated (None: invalid id)."""
+        target = self._job_path(job.job_id)
+        if target is None:
+            logger.error("Refusing to checkpoint job with invalid id %r", str(job.job_id)[:32])
+            return None
+        job.checkpoint_file = target.name
+        job.updated_at = datetime.now(UTC).isoformat()
+        return target
+
+    def _write_checkpoint(self, job: TranscriptJobProgress, target: Path) -> None:
+        """Serialise and durably replace the checkpoint (blocking; never raises)."""
         try:
-            target = self._job_path(job.job_id)
-            temp = self._job_path(job.job_id, ".tmp")
-            if target is None or temp is None:
-                logger.error("Refusing to checkpoint job with invalid id %r", str(job.job_id)[:32])
-                return
-            job.checkpoint_file = target.name
-            job.updated_at = datetime.now(UTC).isoformat()
-            temp.write_text(job.model_dump_json(indent=2), encoding="utf-8")
-            temp.replace(target)
+            atomic_write_text(target, job.model_dump_json(indent=2))
         except Exception as exc:
             # The previous checkpoint is still intact (atomic replace); progress since then
             # is only in memory until a later save succeeds.
             logger.error("Failed to save transcript job checkpoint for %s: %s", job.job_id, exc)
+
+    def _save_checkpoint(self, job: TranscriptJobProgress) -> None:
+        """Persist current job progress to disk atomically (blocking: startup/thread callers)."""
+        target = self._stamp_checkpoint(job)
+        if target is not None:
+            self._write_checkpoint(job, target)
+
+    async def _save_checkpoint_async(self, job: TranscriptJobProgress) -> None:
+        """Persist job progress without blocking the event loop (serialisation + fsync off-loop)."""
+        target = self._stamp_checkpoint(job)
+        if target is None:
+            return
+        lock = self._save_locks.setdefault(job.job_id, asyncio.Lock())
+        async with lock:
+            await asyncio.to_thread(self._write_checkpoint, job, target)
 
     def storage_writable(self) -> bool:
         """Cheap readiness probe: the checkpoint directory exists and is writable."""
@@ -337,41 +371,67 @@ class TranscriptJobManager:
                 for item in job.videos:
                     if item.status == "processing":
                         item.status = "pending"
-            self._save_checkpoint(job)
+            await self._save_checkpoint_async(job)
         self._tasks.clear()
         if running:
             logger.info("Paused %d running transcript job(s) for shutdown", len(running))
 
-    def get_job(self, job_id: str) -> TranscriptJobProgress | None:
+    def _cached_job(self, job_id: str) -> TranscriptJobProgress | None:
         job = self._jobs.get(job_id)
         if job is not None:
             return job
         job = self._recent.get(job_id)
         if job is not None:
             self._recent.move_to_end(job_id)
-            return job
+        return job
+
+    def _load_checkpoint(self, job_id: str) -> TranscriptJobProgress | None:
+        """Read a job from disk (blocking; touches no shared in-memory state)."""
         # Job IDs are uuid4().hex[:12]; reject anything else before touching the filesystem
         target = self._job_path(job_id)
         if target is None or not target.exists():
             return None
         try:
-            job = TranscriptJobProgress(**json.loads(target.read_text(encoding="utf-8")))
+            return TranscriptJobProgress(**json.loads(target.read_text(encoding="utf-8")))
         except Exception as exc:
             logger.warning("Unreadable transcript job checkpoint %s: %s", target.name, exc)
             return None
+
+    def get_job(self, job_id: str) -> TranscriptJobProgress | None:
+        """Blocking lookup; on the event loop use :meth:`aget_job`."""
+        job = self._cached_job(job_id)
+        if job is not None:
+            return job
+        job = self._load_checkpoint(job_id)
+        if job is not None:
+            self._remember(job)
+        return job
+
+    async def aget_job(self, job_id: str) -> TranscriptJobProgress | None:
+        """Like :meth:`get_job`, but a checkpoint read and parse runs off the event loop."""
+        job = self._cached_job(job_id)
+        if job is not None:
+            return job
+        job = await asyncio.to_thread(self._load_checkpoint, job_id)
+        if job is None:
+            return None
+        # Another request may have loaded (or a task started) it while we were reading.
+        current = self._cached_job(job_id)
+        if current is not None:
+            return current
         self._remember(job)
         return job
 
     async def cancel_job(self, job_id: str) -> bool:
         async with self._lock:
             task = self._tasks.get(job_id)
-            job = self.get_job(job_id)
+            job = await self.aget_job(job_id)
             if task and not task.done():
                 task.cancel()
             if job:
                 job.status = JobStatus.CANCELLED
                 job.updated_at = datetime.now(UTC).isoformat()
-                self._save_checkpoint(job)
+                await self._save_checkpoint_async(job)
                 _log_job_outcome(job)
                 return True
         return False
@@ -435,8 +495,12 @@ class TranscriptJobManager:
         return progress
 
     async def resume_job(self, job_id: str) -> TranscriptJobProgress | None:
-        """Resume an existing pending, paused, or rate-limited job from where it left off."""
-        job = self.get_job(job_id)
+        """Resume an existing pending, paused, or rate-limited job from where it left off.
+
+        The launched coroutine checkpoints the new state as its first step, so nothing is
+        awaited between the capacity check and registering the task.
+        """
+        job = await self.aget_job(job_id)
         if not job:
             return None
 
@@ -453,7 +517,6 @@ class TranscriptJobManager:
                 self._check_capacity(job.owner)
                 job.status = JobStatus.QUEUED
                 job.error = None
-                self._save_checkpoint(job)
                 self._launch(job, self._discover_and_run(
                     progress=job,
                     clean_handle=job.channel_handle.strip().lstrip("@"),
@@ -476,7 +539,7 @@ class TranscriptJobManager:
                 if job.status not in (JobStatus.COMPLETED, JobStatus.CANCELLED):
                     job.status = JobStatus.COMPLETED
                     job.completed_at = datetime.now(UTC).isoformat()
-                    self._save_checkpoint(job)
+                    await self._save_checkpoint_async(job)
                 return job
 
             self._check_capacity(job.owner)
@@ -491,7 +554,6 @@ class TranscriptJobManager:
             job.status = JobStatus.RUNNING
             job.error = None
             job.updated_at = datetime.now(UTC).isoformat()
-            self._save_checkpoint(job)
 
             self._launch(job, self._run_job(
                 job,
@@ -520,7 +582,7 @@ class TranscriptJobManager:
 
         progress.status = JobStatus.RUNNING
         progress.updated_at = datetime.now(UTC).isoformat()
-        self._save_checkpoint(progress)
+        await self._save_checkpoint_async(progress)
 
         try:
             channel_svc = ChannelService()
@@ -574,7 +636,7 @@ class TranscriptJobManager:
             progress.remaining = len(eligible_items)
             progress.videos = eligible_items
             progress.updated_at = datetime.now(UTC).isoformat()
-            self._save_checkpoint(progress)
+            await self._save_checkpoint_async(progress)
 
             logger.info(
                 "Job %s discovery complete: channel='%s', discovered=%d, eligible=%d",
@@ -589,14 +651,14 @@ class TranscriptJobManager:
         except asyncio.CancelledError:
             progress.status = JobStatus.CANCELLED
             progress.updated_at = datetime.now(UTC).isoformat()
-            self._save_checkpoint(progress)
+            await self._save_checkpoint_async(progress)
         except Exception as exc:
             logger.exception("Job %s encountered error during discovery: %s", progress.job_id, exc)
             progress.status = JobStatus.FAILED
             # Client-visible; the exception detail stays in the server log.
             progress.error = "Channel discovery failed. Check the channel handle and try again."
             progress.updated_at = datetime.now(UTC).isoformat()
-            self._save_checkpoint(progress)
+            await self._save_checkpoint_async(progress)
             _log_job_outcome(progress)
 
     def _recalculate_counters(self, job: TranscriptJobProgress) -> None:
@@ -637,6 +699,7 @@ class TranscriptJobManager:
             return
 
         if out_lang in ("en", "hi") and item.raw_transcript:
+            item.translation_error = None
             try:
                 from services.translation.service import get_translation_service
                 trans_svc = get_translation_service()
@@ -656,12 +719,17 @@ class TranscriptJobManager:
                     elif out_lang == "hi":
                         item.simple_hindi_transcript = transformed
                         item.language = "Simple Hindi"
+                else:
+                    item.transcript = item.raw_transcript
+                    item.translation_error = public_message("TRANSLATION_FAILED")
             except Exception as trans_exc:
                 logger.warning(
                     "[Job %s] Failed to transform video %s to %s: %s; falling back to raw transcript",
                     job.job_id, item.video_id, out_lang, trans_exc,
                 )
+                # Keep the original text, but say so: the item must never look translated.
                 item.transcript = item.raw_transcript
+                item.translation_error = public_message(_translation_error_code(trans_exc))
 
     async def _run_job(
         self,
@@ -674,7 +742,7 @@ class TranscriptJobManager:
         transcript_svc = TranscriptService()
         job.status = JobStatus.RUNNING
         job.updated_at = datetime.now(UTC).isoformat()
-        self._save_checkpoint(job)
+        await self._save_checkpoint_async(job)
 
         consecutive_rate_limits = 0
 
@@ -768,12 +836,18 @@ class TranscriptJobManager:
                         # Update job to COOLDOWN state and countdown
                         job.status = JobStatus.COOLDOWN
                         end_cooldown = time.time() + cooldown
+                        # Pollers read the in-memory countdown; the checkpoint only needs the
+                        # COOLDOWN state, so it is written on entry and then at most every
+                        # _COOLDOWN_CHECKPOINT_INTERVAL seconds (not on every 2s tick).
+                        last_saved = float("-inf")
                         while time.time() < end_cooldown:
                             if job.status == JobStatus.CANCELLED:
                                 break
                             job.cooldown_seconds_remaining = round(max(0.0, end_cooldown - time.time()), 1)
                             self._recalculate_counters(job)
-                            self._save_checkpoint(job)
+                            if time.monotonic() - last_saved >= _COOLDOWN_CHECKPOINT_INTERVAL:
+                                await self._save_checkpoint_async(job)
+                                last_saved = time.monotonic()
                             await asyncio.sleep(min(2.0, max(0.5, end_cooldown - time.time())))
 
                         job.cooldown_seconds_remaining = 0.0
@@ -788,7 +862,7 @@ class TranscriptJobManager:
                             job.status = JobStatus.PAUSED
                             job.error = "Paused due to persistent YouTube rate limiting. Resume when ready."
                             self._recalculate_counters(job)
-                            self._save_checkpoint(job)
+                            await self._save_checkpoint_async(job)
                             _log_job_outcome(job)
                             return
 
@@ -867,22 +941,33 @@ class TranscriptJobManager:
                 # Retry budget exhausted without a final outcome: keep it resumable.
                 item.status = "rate_limited" if item.error_code == "RATE_LIMITED" else "pending"
             self._recalculate_counters(job)
-            self._save_checkpoint(job)
+            await self._save_checkpoint_async(job)
 
         if job.status not in (JobStatus.CANCELLED, JobStatus.PAUSED):
             job.status = JobStatus.COMPLETED
             job.completed_at = datetime.now(UTC).isoformat()
             job.cooldown_seconds_remaining = 0.0
             self._recalculate_counters(job)
-            self._save_checkpoint(job)
+            await self._save_checkpoint_async(job)
             _log_job_outcome(job)
 
     def generate_csv(self, job_id: str, include_audit_columns: bool = False) -> str:
-        """Generate compliant CSV for the job with exact representation matching job output mode."""
+        """Generate compliant CSV for the job (blocking; on the event loop use :meth:`agenerate_csv`)."""
         job = self.get_job(job_id)
         if not job:
             return ""
+        return self._build_csv(job, include_audit_columns)
 
+    async def agenerate_csv(self, job_id: str, include_audit_columns: bool = False) -> str:
+        """Like :meth:`generate_csv`, with the checkpoint read and CSV building off the event loop."""
+        job = await self.aget_job(job_id)
+        if not job:
+            return ""
+        return await asyncio.to_thread(self._build_csv, job, include_audit_columns)
+
+    @staticmethod
+    def _build_csv(job: TranscriptJobProgress, include_audit_columns: bool = False) -> str:
+        """CSV for the job with exact representation matching the job's output mode."""
         output = io.StringIO()
         writer = csv.writer(output, lineterminator="\n")
 
@@ -950,6 +1035,27 @@ class TranscriptJobManager:
             writer.writerow(safe_csv_row(row))
 
         return output.getvalue()
+
+
+_TRANSCRIPT_BODY_FIELDS = frozenset({
+    "transcript", "raw_transcript", "simple_english_transcript", "simple_hindi_transcript",
+    "transcript_timestamped",
+})
+PROGRESS_PREVIEW_CHARS = 200
+
+
+def job_progress_summary(job: TranscriptJobProgress) -> dict:
+    """Polling view of a job: counters and per-video status, without transcript bodies.
+
+    Each video keeps a short ``transcript`` preview (so clients can still tell "has text"
+    from "no text") and ``transcript_truncated`` says whether more is available through
+    the full job view or the CSV download.
+    """
+    data = job.model_dump(exclude={"videos": {"__all__": set(_TRANSCRIPT_BODY_FIELDS)}})
+    for item, view in zip(job.videos, data["videos"], strict=True):
+        view["transcript"] = item.transcript[:PROGRESS_PREVIEW_CHARS]
+        view["transcript_truncated"] = len(item.transcript) > PROGRESS_PREVIEW_CHARS
+    return data
 
 
 # Global Singleton
