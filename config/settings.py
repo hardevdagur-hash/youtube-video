@@ -166,6 +166,10 @@ class Settings:
         self.whisper_max_concurrency: int = _env_int("WHISPER_MAX_CONCURRENCY", 1, 1, 10)
         # How long a request waits for a free speech-to-text slot before failing (retryable).
         self.stt_queue_timeout_seconds: int = _env_int("STT_QUEUE_TIMEOUT_SECONDS", 900, 10, 7200)
+        # Worker threads that may block waiting for a speech-to-text slot at once; further
+        # requests fail fast (STT_BUSY) so waiting never fills the transcript worker pool.
+        # Channel jobs and runs wait on the event loop instead and are not counted here.
+        self.stt_max_thread_waiters: int = _env_int("STT_MAX_THREAD_WAITERS", 2, 0, 64)
         # Dedicated threads for long transcript work, so it never starves sign-in or health.
         self.transcript_worker_threads: int = _env_int("TRANSCRIPT_WORKER_THREADS", 8, 2, 64)
         self.transcript_request_interval: float = _env_float("TRANSCRIPT_REQUEST_INTERVAL", 2.5, 0.0, 60.0)

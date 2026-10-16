@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 
 class JobStatus(str, Enum):
@@ -49,6 +49,9 @@ class TranscriptVideoItem(BaseModel):
     next_retry_at: str | None = None
     last_attempt_at: str | None = None
     completed_at: str | None = None
+    # Fingerprint of the transcript bodies last written to this item's body file (None: not
+    # persisted yet), so a checkpoint rewrites only the bodies that changed. Never serialised.
+    _persisted_body: int | None = PrivateAttr(default=None)
 
 
 class TranscriptJobProgress(BaseModel):

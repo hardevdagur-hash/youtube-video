@@ -1041,15 +1041,20 @@ async def api_channel_transcripts(
 
                 # 2. Try Whisper fallback if enabled
                 if allow_whisper and settings.whisper_enabled:
+                    from services.public_errors import public_message
+                    from services.transcription.stt_gate import STTBusyError, stt_gate
+
                     try:
-                        w_res = await _transcript_work(
-                            transcript_svc.get_transcript,
-                            video_id,
-                            allow_whisper=True,
-                            video_title=title,
-                            channel_title=channel_title,
-                            output_format=output_language,
-                        )
+                        # Wait for the speech-to-text slot here, not in a pool thread.
+                        async with stt_gate.reserve(video_id):
+                            w_res = await _transcript_work(
+                                transcript_svc.get_transcript,
+                                video_id,
+                                allow_whisper=True,
+                                video_title=title,
+                                channel_title=channel_title,
+                                output_format=output_language,
+                            )
                         if w_res.success and (w_res.plain_text or w_res.paragraph_text):
                             raw_text = getattr(w_res, "raw_transcript", "") or (w_res.plain_text or w_res.paragraph_text or "")
                             out_text, out_label, translation_error = await _localized_transcript(
@@ -1096,6 +1101,7 @@ async def api_channel_transcripts(
                             }
                     except Exception as exc:
                         logger.warning("[%s] Whisper fallback failed for %s: %s", rid, video_id, exc)
+                        busy = isinstance(exc, STTBusyError)
                         return {
                             "index": idx,
                             "video_id": video_id,
@@ -1111,8 +1117,8 @@ async def api_channel_transcripts(
                             "transcript": "",
                             "source": None,
                             "method": None,
-                            "error_code": "STT_FAILED",
-                            "error_message": "Speech-to-text failed.",
+                            "error_code": "STT_BUSY" if busy else "STT_FAILED",
+                            "error_message": public_message("STT_BUSY") if busy else "Speech-to-text failed.",
                         }
 
                 # Captions unavailable and whisper disabled

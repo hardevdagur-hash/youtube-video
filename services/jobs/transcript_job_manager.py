@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import logging
 import re
+import shutil
 import time
 import uuid
 from collections import OrderedDict
@@ -33,6 +35,17 @@ from utils.atomic_file import atomic_write_text
 logger = logging.getLogger(__name__)
 
 _JOB_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+
+# Transcript text of a video item. The checkpoint (<job_id>.json) holds only job and item
+# metadata; each item's bodies live in <job_id>.bodies/<video_id>.json and are written once
+# when they change, so a checkpoint after every video stays small however large the job is.
+_TRANSCRIPT_BODY_FIELDS = (
+    "transcript", "raw_transcript", "simple_english_transcript", "simple_hindi_transcript",
+    "transcript_timestamped",
+)
+_BODIES_SUFFIX = ".bodies"
+_CHECKPOINT_EXCLUDE = {"videos": {"__all__": set(_TRANSCRIPT_BODY_FIELDS)}}
 # While a job waits out a rate-limit cooldown, the countdown is checkpointed at most this often.
 _COOLDOWN_CHECKPOINT_INTERVAL = 15.0
 
@@ -43,6 +56,22 @@ RETRYABLE_ITEM_CODES = TRANSIENT_STT_CODES | YOUTUBE_BLOCK_CODES | {"NETWORK_ERR
 def _to_thread(func, *args, **kwargs):
     """Blocking provider calls run on the transcript worker pool with the job's logging context."""
     return run_transcript_work(func, *args, **kwargs)
+
+
+def _body_values(item: TranscriptVideoItem) -> tuple[str, ...]:
+    return tuple(getattr(item, field) for field in _TRANSCRIPT_BODY_FIELDS)
+
+
+def _body_fingerprint(values: tuple[str, ...]) -> int:
+    # str objects cache their hash, so re-fingerprinting unchanged bodies costs nothing.
+    return hash(values)
+
+
+def _body_file_name(video_id: str) -> str:
+    """File name for a video's bodies; ids that are not plain YouTube ids are hashed."""
+    if isinstance(video_id, str) and _VIDEO_ID_RE.match(video_id):
+        return f"{video_id}.json"
+    return "x" + hashlib.sha256(str(video_id).encode("utf-8")).hexdigest()[:24] + ".json"
 
 
 def _job_duration_seconds(job: TranscriptJobProgress) -> float | None:
@@ -158,13 +187,49 @@ class TranscriptJobManager:
 
     # -- lifecycle ------------------------------------------------------------
 
+    def _bodies_dir(self, job_id: str) -> Path | None:
+        return self._job_path(job_id, _BODIES_SUFFIX)
+
+    def _read_checkpoint(self, path: Path, with_bodies: bool = True) -> TranscriptJobProgress:
+        """Parse a checkpoint file; ``with_bodies`` also loads each item's transcript bodies.
+
+        Checkpoints written before bodies moved to their own files carry them inline; those
+        items are marked unpersisted, so the next save moves them out (a one-time migration).
+        A job read without bodies is for status bookkeeping only: saving it never touches
+        the body files (its empty bodies match the fingerprint recorded here).
+        """
+        data = json.loads(path.read_text(encoding="utf-8"))
+        job = TranscriptJobProgress(**data)
+        bodies_dir = self._bodies_dir(job.job_id) if with_bodies else None
+        for item, raw in zip(job.videos, data.get("videos") or [], strict=False):
+            inline = any(raw.get(field) for field in _TRANSCRIPT_BODY_FIELDS)
+            if bodies_dir is not None:
+                body_path = bodies_dir / _body_file_name(item.video_id)
+                try:
+                    stored = json.loads(body_path.read_text(encoding="utf-8"))
+                except FileNotFoundError:
+                    stored = None
+                except (OSError, ValueError) as exc:
+                    logger.warning("Unreadable transcript body %s for job %s: %s", body_path.name, job.job_id, exc)
+                    stored = None
+                if isinstance(stored, dict):
+                    for field in _TRANSCRIPT_BODY_FIELDS:
+                        value = stored.get(field)
+                        if isinstance(value, str):
+                            setattr(item, field, value)
+            item._persisted_body = None if inline else _body_fingerprint(_body_values(item))
+        return job
+
     def _iter_checkpoints(self):
-        """Yield ``(path, job)`` for every readable checkpoint (unreadable ones are logged)."""
+        """Yield ``(path, job)`` for every readable checkpoint, without transcript bodies.
+
+        Unreadable checkpoints are logged and skipped.
+        """
         for file_path in sorted(self._jobs_dir.glob("*.json")):
             if self._job_path(file_path.stem) is None:
                 continue
             try:
-                job = TranscriptJobProgress(**json.loads(file_path.read_text(encoding="utf-8")))
+                job = self._read_checkpoint(file_path, with_bodies=False)
             except Exception as exc:
                 logger.warning("Skipping unreadable transcript job checkpoint %s: %s", file_path.name, exc)
                 continue
@@ -207,7 +272,7 @@ class TranscriptJobManager:
             try:
                 if datetime.fromtimestamp(file_path.stat().st_mtime, UTC) >= cutoff:
                     continue  # cheap pre-filter: recently written
-                job = TranscriptJobProgress(**json.loads(file_path.read_text(encoding="utf-8")))
+                job = self._read_checkpoint(file_path, with_bodies=False)
                 updated = datetime.fromisoformat(job.updated_at.replace("Z", "+00:00"))
                 if updated.tzinfo is None:
                     updated = updated.replace(tzinfo=UTC)
@@ -215,13 +280,30 @@ class TranscriptJobManager:
                     continue
                 file_path.unlink()
                 removed.append(job_id)
+                bodies_dir = self._bodies_dir(job_id)
+                if bodies_dir is not None:
+                    shutil.rmtree(bodies_dir, ignore_errors=True)
             except FileNotFoundError:
                 continue
             except Exception as exc:
                 logger.warning("Could not evaluate job checkpoint %s for expiry: %s", file_path.name, exc)
-        for stale_tmp in self._jobs_dir.glob("*.tmp"):
+        hour_ago = now - timedelta(hours=1)
+        for bodies_dir in self._jobs_dir.glob(f"*{_BODIES_SUFFIX}"):
+            # Bodies whose checkpoint is gone (deleted by hand, or a restore without it).
+            job_id = bodies_dir.name[: -len(_BODIES_SUFFIX)]
             try:
-                if datetime.fromtimestamp(stale_tmp.stat().st_mtime, UTC) < now - timedelta(hours=1):
+                if (
+                    self._job_path(job_id) is not None
+                    and not (self._jobs_dir / f"{job_id}.json").exists()
+                    and job_id not in self._jobs and job_id not in self._tasks
+                    and datetime.fromtimestamp(bodies_dir.stat().st_mtime, UTC) < hour_ago
+                ):
+                    shutil.rmtree(bodies_dir, ignore_errors=True)
+            except OSError:
+                continue
+        for stale_tmp in (*self._jobs_dir.glob("*.tmp"), *self._jobs_dir.glob(f"*{_BODIES_SUFFIX}/*.tmp")):
+            try:
+                if datetime.fromtimestamp(stale_tmp.stat().st_mtime, UTC) < hour_ago:
                     stale_tmp.unlink()
             except OSError:
                 continue
@@ -299,10 +381,34 @@ class TranscriptJobManager:
         job.updated_at = datetime.now(UTC).isoformat()
         return target
 
+    def _write_bodies(self, job: TranscriptJobProgress) -> None:
+        """Write the body file of every item whose transcript text changed since its last write."""
+        bodies_dir = self._bodies_dir(job.job_id)
+        if bodies_dir is None:
+            return
+        for item in list(job.videos):
+            values = _body_values(item)
+            fingerprint = _body_fingerprint(values)
+            if fingerprint == item._persisted_body:
+                continue
+            body_path = bodies_dir / _body_file_name(item.video_id)
+            payload = {field: value for field, value in zip(_TRANSCRIPT_BODY_FIELDS, values, strict=True) if value}
+            if payload:
+                bodies_dir.mkdir(exist_ok=True)
+                atomic_write_text(body_path, json.dumps(payload, ensure_ascii=False))
+            else:
+                body_path.unlink(missing_ok=True)
+            item._persisted_body = fingerprint
+
     def _write_checkpoint(self, job: TranscriptJobProgress, target: Path) -> None:
-        """Serialise and durably replace the checkpoint (blocking; never raises)."""
+        """Durably write changed transcript bodies, then replace the checkpoint (blocking; never raises).
+
+        Bodies go first: a checkpoint that says an item succeeded must never point at text
+        that is not on disk. If a body cannot be written the checkpoint is not replaced.
+        """
         try:
-            atomic_write_text(target, job.model_dump_json(indent=2))
+            self._write_bodies(job)
+            atomic_write_text(target, job.model_dump_json(exclude=_CHECKPOINT_EXCLUDE))
         except Exception as exc:
             # The previous checkpoint is still intact (atomic replace); progress since then
             # is only in memory until a later save succeeds.
@@ -392,7 +498,7 @@ class TranscriptJobManager:
         if target is None or not target.exists():
             return None
         try:
-            return TranscriptJobProgress(**json.loads(target.read_text(encoding="utf-8")))
+            return self._read_checkpoint(target)
         except Exception as exc:
             logger.warning("Unreadable transcript job checkpoint %s: %s", target.name, exc)
             return None
@@ -738,6 +844,7 @@ class TranscriptJobManager:
     ) -> None:
         """Execute transcript retrieval with pacing, circuit breaker cooldown, and retry."""
         from services.transcript_service import TranscriptService
+        from services.transcription.stt_gate import STTBusyError, stt_gate
 
         transcript_svc = TranscriptService()
         job.status = JobStatus.RUNNING
@@ -872,13 +979,15 @@ class TranscriptJobManager:
                     # If captions disabled/not found and whisper enabled, try Whisper STT
                     if error_code in ("NO_CAPTIONS", "CAPTIONS_DISABLED") and settings.whisper_enabled:
                         try:
-                            whisper_res = await _to_thread(
-                                transcript_svc.get_transcript,
-                                video_id=item.video_id,
-                                force_refresh=force_refresh,
-                                allow_whisper=True,
-                                output_format=getattr(job, "output_language", "original"),
-                            )
+                            # Wait for the speech-to-text slot here, not in a pool thread.
+                            async with stt_gate.reserve(item.video_id):
+                                whisper_res = await _to_thread(
+                                    transcript_svc.get_transcript,
+                                    video_id=item.video_id,
+                                    force_refresh=force_refresh,
+                                    allow_whisper=True,
+                                    output_format=getattr(job, "output_language", "original"),
+                                )
                             if whisper_res.success and (whisper_res.plain_text or whisper_res.paragraph_text):
                                 item.status = "success"
                                 item.transcript = whisper_res.plain_text or whisper_res.paragraph_text or ""
@@ -898,6 +1007,9 @@ class TranscriptJobManager:
                                 # network): the video may well have speech. Keep it resumable.
                                 error_code = whisper_code
                                 error_msg = public_message(whisper_code)
+                        except STTBusyError:
+                            error_code = STTBusyError.error_code  # retryable: the item stays resumable
+                            error_msg = public_message(error_code)
                         except Exception as w_exc:
                             logger.warning("Whisper STT fallback failed for %s: %s", item.video_id, w_exc)
                             error_code = "STT_FAILED"
@@ -1037,10 +1149,6 @@ class TranscriptJobManager:
         return output.getvalue()
 
 
-_TRANSCRIPT_BODY_FIELDS = frozenset({
-    "transcript", "raw_transcript", "simple_english_transcript", "simple_hindi_transcript",
-    "transcript_timestamped",
-})
 PROGRESS_PREVIEW_CHARS = 200
 
 
