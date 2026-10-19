@@ -100,7 +100,7 @@ each one. The essentials:
 | `JWT_SECRET_KEY` | production | ≥ 32 random chars; signs session cookies |
 | `AUTH_USERS` / `API_KEYS` | production (one of these or Google) | `user:role:scrypt-hash` / `name:role:sha256` |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, `GOOGLE_ALLOWED_DOMAINS` (Workspace, `hd` checked) / `GOOGLE_ALLOWED_PERSONAL_EMAIL_DOMAINS` / `GOOGLE_ALLOW_ANY_ACCOUNT`, `GOOGLE_ADMIN_SUBJECTS` | no | Optional "Continue with Google"; see [docs/GOOGLE_SIGN_IN.md](docs/GOOGLE_SIGN_IN.md) |
-| `WHISPER_MAX_CONCURRENCY`, `STT_QUEUE_TIMEOUT_SECONDS`, `TRANSCRIPT_WORKER_THREADS` | no | Server-wide speech-to-text limit and the dedicated transcript worker pool |
+| `WHISPER_MAX_CONCURRENCY`, `STT_QUEUE_TIMEOUT_SECONDS`, `STT_MAX_THREAD_WAITERS`, `TRANSCRIPT_WORKER_THREADS` | no | Server-wide speech-to-text limit and the dedicated transcript worker pool |
 | `YOUTUBE_PROXY_URL`, `YTDLP_COOKIES_FILE` | no | Optional mitigations when YouTube blocks the server IP (`BOT_BLOCKED`); see docs/OPERATIONS.md |
 | `CORS_ORIGINS` | no | Only for cross-origin browser clients; never `*` |
 | `DATA_DIR` | no | Persistent data (`./data`; `/app/data` in Docker) |

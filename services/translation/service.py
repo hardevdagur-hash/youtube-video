@@ -133,6 +133,18 @@ class TranslationService:
             err_str = str(exc).lower()
             if "authentication" in err_str or "api_key" in err_str:
                 raise GroqAuthError(f"Groq authentication failed during translation: {exc}") from exc
+            if "model_not_found" in err_str or "does not exist" in err_str or "decommissioned" in err_str:
+                # Configuration problem, not a transient failure: retrying cannot help.
+                logger.error(
+                    "Translation model %r is not available to this Groq key; set GROQ_TRANSLATION_MODEL "
+                    "to a model listed at https://console.groq.com/docs/models",
+                    self.model,
+                )
+                raise TranslationError(
+                    f"Translation model {self.model!r} is not available: {exc}",
+                    error_code="TRANSLATION_UNAVAILABLE",
+                    retryable=False,
+                ) from exc
             raise TranslationError(f"Translation failed: {exc}", error_code="TRANSLATION_FAILED") from exc
 
         if finish_reason == "length":

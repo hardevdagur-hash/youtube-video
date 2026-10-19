@@ -40,6 +40,8 @@ export interface ChannelVideoTranscriptSimple {
   method?: string | null;
   error_code?: string | null;
   error_message?: string | null;
+  // Set when the Simple English / Simple Hindi rewrite failed; `transcript` is then the original text.
+  translation_error?: string | null;
   retryable?: boolean;
   attempt_count?: number;
   next_retry_at?: string | null;
@@ -96,6 +98,11 @@ export const LANGUAGE_LABELS: Record<string, string> = {
 
 export function getLanguageLabel(code: string): string {
   return LANGUAGE_LABELS[code] || code.toUpperCase();
+}
+
+// Label of the rewritten (non-original) view for an output mode.
+export function simpleModeLabel(outputLanguage: string | null | undefined): string {
+  return outputLanguage === 'hi' ? 'Simple Hindi' : 'Simple English';
 }
 
 // --- Production Plan STT & Translation Types ---

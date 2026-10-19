@@ -7,12 +7,12 @@ without changing service-layer code.
 
 import json
 import logging
-import os
 import re
 from pathlib import Path
 from typing import Any
 
 from models.transcript import TranscriptResult
+from utils.atomic_file import atomic_write_text
 from utils.cache import TTLCache
 
 logger = logging.getLogger(__name__)
@@ -65,9 +65,8 @@ class TranscriptRepository:
 
     @staticmethod
     def _write_atomic(path: Path, data: dict[str, Any]) -> None:
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, path)
+        # Unique temp file per write: concurrent saves of one video never clobber each other.
+        atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False))
 
     def get(self, video_id: str) -> TranscriptResult | None:
         """Retrieve a cached transcript by video ID.

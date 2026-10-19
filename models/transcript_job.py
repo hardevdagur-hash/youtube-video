@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 
 class JobStatus(str, Enum):
@@ -41,11 +41,17 @@ class TranscriptVideoItem(BaseModel):
     method: str | None = None  # caption | speech_to_text
     error_code: str | None = None
     error_message: str | None = None
+    # Set when the requested Simple English / Simple Hindi rewrite failed and ``transcript``
+    # holds the original text instead (client-safe message; details are in the server log).
+    translation_error: str | None = None
     attempt_count: int = 0
     retryable: bool = False
     next_retry_at: str | None = None
     last_attempt_at: str | None = None
     completed_at: str | None = None
+    # Fingerprint of the transcript bodies last written to this item's body file (None: not
+    # persisted yet), so a checkpoint rewrites only the bodies that changed. Never serialised.
+    _persisted_body: int | None = PrivateAttr(default=None)
 
 
 class TranscriptJobProgress(BaseModel):

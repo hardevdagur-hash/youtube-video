@@ -115,7 +115,8 @@ class Settings:
 
         # Groq: speech-to-text fallback and Simple English / Simple Hindi rewriting
         self.groq_whisper_model: str = _get_env("GROQ_WHISPER_MODEL", "whisper-large-v3")
-        self.groq_translation_model: str = _get_env("GROQ_TRANSLATION_MODEL", "llama-3.3-70b-versatile")
+        # llama-3.3-70b-versatile was retired by Groq (404 model_not_found); gpt-oss-120b replaces it.
+        self.groq_translation_model: str = _get_env("GROQ_TRANSLATION_MODEL", "openai/gpt-oss-120b")
         self.groq_timeout_seconds: int = _env_int("GROQ_TIMEOUT_SECONDS", 120, 5, 900)
         self.groq_max_retries: int = _env_int("GROQ_MAX_RETRIES", 3, 1, 10)
 
@@ -165,6 +166,10 @@ class Settings:
         self.whisper_max_concurrency: int = _env_int("WHISPER_MAX_CONCURRENCY", 1, 1, 10)
         # How long a request waits for a free speech-to-text slot before failing (retryable).
         self.stt_queue_timeout_seconds: int = _env_int("STT_QUEUE_TIMEOUT_SECONDS", 900, 10, 7200)
+        # Worker threads that may block waiting for a speech-to-text slot at once; further
+        # requests fail fast (STT_BUSY) so waiting never fills the transcript worker pool.
+        # Channel jobs and runs wait on the event loop instead and are not counted here.
+        self.stt_max_thread_waiters: int = _env_int("STT_MAX_THREAD_WAITERS", 2, 0, 64)
         # Dedicated threads for long transcript work, so it never starves sign-in or health.
         self.transcript_worker_threads: int = _env_int("TRANSCRIPT_WORKER_THREADS", 8, 2, 64)
         self.transcript_request_interval: float = _env_float("TRANSCRIPT_REQUEST_INTERVAL", 2.5, 0.0, 60.0)
@@ -177,6 +182,9 @@ class Settings:
         # Synchronous channel requests hold an HTTP connection for the whole run: keep them small.
         self.max_videos_sync_export: int = _env_int("MAX_VIDEOS_SYNC_EXPORT", 25, 1, 200)
         self.max_concurrent_sync_channel_runs: int = _env_int("MAX_CONCURRENT_SYNC_CHANNEL_RUNS", 2, 1, 20)
+        # In-flight synchronous transcript requests (single video, sync channel, CSV export)
+        # per signed-in user: bounds what one account can spend on captions/STT at once.
+        self.max_inflight_transcripts_per_user: int = _env_int("MAX_INFLIGHT_TRANSCRIPTS_PER_USER", 2, 1, 20)
         # Running background jobs (each holds YouTube/Groq capacity for its whole run)
         self.max_active_jobs: int = _env_int("MAX_ACTIVE_JOBS", 4, 1, 50)
         self.max_active_jobs_per_user: int = _env_int("MAX_ACTIVE_JOBS_PER_USER", 2, 1, 50)

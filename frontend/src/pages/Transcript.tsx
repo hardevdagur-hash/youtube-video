@@ -9,7 +9,9 @@ import {
 import { Container, Badge, Card } from '../components/ui';
 import VideoUrlInput from '../components/transcript/VideoUrlInput';
 import { transcriptService } from '../services/TranscriptService';
+import { isJobPollable, startJobPolling } from '../services/jobPolling';
 import { channelWindowLabel, useAuth } from '../auth/AuthContext';
+import { simpleModeLabel } from '../types';
 import type {
   ChannelVideoTranscriptSimple,
   TranscriptJobProgressData,
@@ -370,32 +372,33 @@ export default function Transcript() {
     }
   };
 
-  // Background Job polling
+  // Background Job polling: only while the job can still change (queued/running/cooldown).
+  // Restarts only when the job or its pollability changes, not on every progress update.
+  const activeJobId = activeJob?.job_id;
+  const activeJobPollable = isJobPollable(activeJob?.status);
   useEffect(() => {
-    if (!activeJob || activeJob.status === 'completed' || activeJob.status === 'cancelled' || activeJob.status === 'failed') {
+    if (!activeJobId || !activeJobPollable) {
       return;
     }
-
-    const interval = setInterval(async () => {
-      try {
-        const updated = await transcriptService.getJobProgress(activeJob.job_id);
+    return startJobPolling({
+      jobId: activeJobId,
+      fetchProgress: id => transcriptService.getJobProgress(id, 'progress'),
+      fetchFull: id => transcriptService.getJobProgress(id, 'full'),
+      onUpdate: updated => {
         setActiveJob(updated);
         if (updated.videos && updated.videos.length > 0) {
           setChannelVideos(updated.videos);
         }
-        if (updated.status === 'completed' || updated.status === 'cancelled' || updated.status === 'failed' || updated.status === 'paused') {
-          setChannelLoading(false);
-          if (updated.status !== 'paused') {
-            clearInterval(interval);
-          }
+      },
+      onStop: () => setChannelLoading(false),
+      onFatalError: err => {
+        setChannelLoading(false);
+        if ((err as { status?: number })?.status === 404) {
+          setChannelError('This job is no longer available.');
         }
-      } catch (err) {
-        console.error('Job polling error:', err);
-      }
-    }, 1500);
-
-    return () => clearInterval(interval);
-  }, [activeJob]);
+      },
+    });
+  }, [activeJobId, activeJobPollable]);
 
   const handleChannelSubmit = useCallback(async (handleOverride?: string) => {
     const input = handleOverride || channelInputRef.current?.value || '';
@@ -443,6 +446,14 @@ export default function Transcript() {
       await transcriptService.cancelJob(activeJob.job_id);
       setActiveJob(prev => prev ? { ...prev, status: 'cancelled' } : null);
       setChannelLoading(false);
+      // Polling showed transcript previews only; load the full results once.
+      const full = await transcriptService.getJobProgress(activeJob.job_id, 'full').catch(() => null);
+      if (full) {
+        setActiveJob(full);
+        if (full.videos && full.videos.length > 0) {
+          setChannelVideos(full.videos);
+        }
+      }
     } catch (err) {
       console.error('Cancel job error:', err);
     }
@@ -1452,12 +1463,14 @@ export default function Transcript() {
                               )}
                             </div>
 
-                            {/* Simple English vs Original Spoken Toggle */}
+                            {/* Simple English / Simple Hindi vs Original Spoken Toggle */}
                             {Boolean(video.raw_transcript) && (() => {
                               const isRawActive = showRawForIdx[idx] !== undefined
                                 ? showRawForIdx[idx]
                                 : (activeJob?.output_language === 'original');
+                              const simpleLabel = simpleModeLabel(activeJob?.output_language ?? channelOutputLang);
                               return (
+                                <>
                                 <div className="flex items-center gap-2 mb-3">
                                   <button
                                     type="button"
@@ -1468,7 +1481,7 @@ export default function Transcript() {
                                         : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'
                                     }`}
                                   >
-                                    <Sparkles size={11} /> Simple English
+                                    <Sparkles size={11} /> {simpleLabel}
                                   </button>
                                   <button
                                     type="button"
@@ -1482,6 +1495,18 @@ export default function Transcript() {
                                     <FileText size={11} /> Original Spoken
                                   </button>
                                 </div>
+                                {!isRawActive && video.translation_error && (
+                                  <div
+                                    role="alert"
+                                    className="mb-3 flex items-start gap-2 rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 px-3 py-2 text-xs text-amber-800 dark:text-amber-300"
+                                  >
+                                    <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
+                                    <span>
+                                      {simpleLabel} is not available for this video: {video.translation_error} Showing the original transcript instead.
+                                    </span>
+                                  </div>
+                                )}
+                                </>
                               );
                             })()}
 

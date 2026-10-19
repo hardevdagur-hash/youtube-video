@@ -41,26 +41,29 @@ COPY requirements.lock ./
 RUN pip install -r requirements.lock
 
 # Application code only (no tests, docs, .env or local data; see also .dockerignore).
-COPY --chown=app:app api/ api/
-COPY --chown=app:app clients/ clients/
-COPY --chown=app:app config/ config/
-COPY --chown=app:app exceptions/ exceptions/
-COPY --chown=app:app infrastructure/ infrastructure/
-COPY --chown=app:app interfaces/ interfaces/
-COPY --chown=app:app models/ models/
-COPY --chown=app:app pipeline/ pipeline/
-COPY --chown=app:app providers/ providers/
-COPY --chown=app:app repositories/ repositories/
-COPY --chown=app:app security/ security/
-COPY --chown=app:app services/ services/
-COPY --chown=app:app utils/ utils/
-COPY --chown=app:app validators/ validators/
-COPY --chown=app:app webapp/ webapp/
-COPY --chown=app:app scripts/healthcheck.py scripts/healthcheck.py
-COPY --from=frontend --chown=app:app /build/dist frontend/dist
+# Owned by root (read-only to the app user), so a compromised process cannot rewrite its
+# own code; compose also mounts the root filesystem read-only.
+COPY api/ api/
+COPY clients/ clients/
+COPY config/ config/
+COPY exceptions/ exceptions/
+COPY infrastructure/ infrastructure/
+COPY interfaces/ interfaces/
+COPY models/ models/
+COPY pipeline/ pipeline/
+COPY providers/ providers/
+COPY repositories/ repositories/
+COPY security/ security/
+COPY services/ services/
+COPY utils/ utils/
+COPY validators/ validators/
+COPY webapp/ webapp/
+COPY scripts/healthcheck.py scripts/healthcheck.py
+COPY --from=frontend /build/dist frontend/dist
 
-# /app/data is the persistent volume (jobs, transcript cache). Created here so a fresh
-# named volume inherits app ownership.
+# /app/data is the persistent volume (jobs, transcript cache, speech-to-text audio under
+# data/tmp) and the only app-owned path. Created here so a fresh named volume inherits
+# app ownership. Everything else the app writes goes to the /tmp tmpfs (XDG_CACHE_HOME).
 RUN mkdir -p /app/data && chown app:app /app/data
 
 ENV APP_ENV=production \

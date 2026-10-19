@@ -183,21 +183,21 @@ async def test_translation_outage_keeps_original_transcripts(env, monkeypatch):
 
 
 async def test_disk_full_mid_job_keeps_last_good_checkpoint(env, monkeypatch):
-    from pathlib import Path
+    import services.jobs.transcript_job_manager as jm
 
-    real_write_text = Path.write_text
+    real_atomic_write = jm.atomic_write_text
     disk = {"full": False}
 
-    def write_text(self, *args, **kwargs):
-        if disk["full"] and self.suffix == ".tmp":
+    def atomic_write_text(path, text, *args, **kwargs):
+        if disk["full"]:
             raise OSError(28, "No space left on device")
-        return real_write_text(self, *args, **kwargs)
+        return real_atomic_write(path, text, *args, **kwargs)
 
     def first_video(video_id, **kwargs):
         disk["full"] = True  # the disk fills up while the job is running
         return _ok(f"transcript of {video_id}")
 
-    monkeypatch.setattr(Path, "write_text", write_text)
+    monkeypatch.setattr(jm, "atomic_write_text", atomic_write_text)
     env.behaviour[VIDEOS[0]] = first_video
     job = await env.manager.start_channel_job("chan", owner="u", output_language="original")
     job = await _finish(env.manager, job.job_id)
