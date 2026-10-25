@@ -21,7 +21,8 @@ httplib2>=0.32.0,<0.33.0
 youtube-transcript-api>=1.2.0,<2.0.0
 requests>=2.31.0,<3.0.0
 urllib3>=1.26.18,<3.0.0
-certifi>=2024.2.0
+# >=2026.10.19: earlier bundles trust revoked emSign/eMudhra intermediates (PYSEC-2026-4320)
+certifi>=2026.10.19
 
 # Speech-to-text fallback (audio download + Groq Whisper) and translation (Groq LLM)
 yt-dlp>=2024.12.0
