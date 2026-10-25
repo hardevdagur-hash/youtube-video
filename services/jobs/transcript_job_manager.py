@@ -104,7 +104,20 @@ def _translation_error_code(exc: BaseException) -> str:
 
     if isinstance(exc, GroqAuthError) or getattr(exc, "error_code", None) == "TRANSLATION_UNAVAILABLE":
         return "TRANSLATION_UNAVAILABLE"  # missing key or model: a server configuration problem
+    if getattr(exc, "error_code", None) == "TRANSLATION_RATE_LIMITED":
+        return "TRANSLATION_RATE_LIMITED"  # Groq quota: retried on resume
     return "TRANSLATION_FAILED"
+
+
+def _needs_translation_retry(job: TranscriptJobProgress, item: TranscriptVideoItem) -> bool:
+    """A succeeded item whose Simple English / Simple Hindi rewrite failed (it holds the original text)."""
+    out_lang = (job.output_language or "original").lower().strip()
+    return item.status == "success" and bool(item.translation_error) and out_lang in ("en", "hi")
+
+
+def _format_wait(seconds: float) -> str:
+    minutes = max(1, round(seconds / 60))
+    return f"about {minutes} minute{'s' if minutes != 1 else ''}"
 
 
 def parse_date_boundary(date_str: str | None, is_end_of_day: bool = False) -> datetime | None:
@@ -529,9 +542,12 @@ class TranscriptJobManager:
         return job
 
     async def cancel_job(self, job_id: str) -> bool:
+        """Cancel a queued, running, cooling-down or paused job; False if it is unknown or already finished."""
         async with self._lock:
             task = self._tasks.get(job_id)
             job = await self.aget_job(job_id)
+            if job is not None and job.status in TERMINAL_STATUSES:
+                return False  # a completed/failed/cancelled job keeps its final state
             if task and not task.done():
                 task.cancel()
             if job:
@@ -636,9 +652,12 @@ class TranscriptJobManager:
                 logger.info("Restarted discovery for transcript job %s", job_id)
                 return job
 
-            # "processing" items were interrupted mid-flight (crash) and are retried too.
+            # "processing" items were interrupted mid-flight (crash) and are retried too, and
+            # succeeded items whose translation failed get the translation retried.
             pending_items = [
-                v for v in job.videos if v.status in ("pending", "processing", "rate_limited", "temporary_error")
+                v for v in job.videos
+                if v.status in ("pending", "processing", "rate_limited", "temporary_error")
+                or _needs_translation_retry(job, v)
             ]
             if not pending_items:
                 logger.info("Job %s has no pending or rate-limited items to resume.", job_id)
@@ -791,10 +810,33 @@ class TranscriptJobManager:
             if v.status == "failed"
             and v.error_code not in ("NO_CAPTIONS", "CAPTIONS_DISABLED", "RATE_LIMITED")
         )
+        job.translation_failed = sum(1 for v in job.videos if _needs_translation_retry(job, v))
         job.updated_at = datetime.now(UTC).isoformat()
 
-    async def _apply_output_language(self, job: TranscriptJobProgress, item: TranscriptVideoItem) -> None:
-        """Transform acquired transcript to Simple English or requested language with graceful fallback."""
+    async def _pause_for_provider_limit(self, job: TranscriptJobProgress, provider: str, wait: float | None) -> None:
+        """Stop the job as PAUSED because Groq refused for a while; Resume continues where it left off."""
+        if job.status == JobStatus.CANCELLED:
+            return  # cancelled while the request was in flight: keep the user's decision
+        when = f" in {_format_wait(wait)}" if wait else " later"
+        logger.warning(
+            "[Job %s] %s usage limit reached (retry after %ss); pausing job", job.job_id, provider,
+            round(wait) if wait else "?",
+        )
+        job.status = JobStatus.PAUSED
+        job.cooldown_seconds_remaining = 0.0
+        job.error = f"Paused: the {provider} provider's usage limit was reached. Resume{when}."
+        self._recalculate_counters(job)
+        await self._save_checkpoint_async(job)
+        _log_job_outcome(job)
+
+    async def _apply_output_language(
+        self, job: TranscriptJobProgress, item: TranscriptVideoItem,
+    ) -> tuple[str | None, float | None]:
+        """Transform acquired transcript to Simple English or requested language with graceful fallback.
+
+        Returns ``(error_code, retry_after)``: ``(None, None)`` when nothing failed. On failure
+        the item keeps the original text and ``translation_error`` says so; Resume retries it.
+        """
         out_lang = (getattr(job, "output_language", None) or "original").lower().strip()
         item.output_format = out_lang
 
@@ -802,7 +844,8 @@ class TranscriptJobManager:
         if out_lang in ("original", "original_spoken"):
             item.transcript = item.raw_transcript
             item.language = item.source_language or item.language or "en"
-            return
+            item.translation_error = None
+            return None, None
 
         if out_lang in ("en", "hi") and item.raw_transcript:
             item.translation_error = None
@@ -828,14 +871,20 @@ class TranscriptJobManager:
                 else:
                     item.transcript = item.raw_transcript
                     item.translation_error = public_message("TRANSLATION_FAILED")
+                    return "TRANSLATION_FAILED", None
             except Exception as trans_exc:
+                code = _translation_error_code(trans_exc)
                 logger.warning(
-                    "[Job %s] Failed to transform video %s to %s: %s; falling back to raw transcript",
-                    job.job_id, item.video_id, out_lang, trans_exc,
+                    "[Job %s] Failed to transform video %s to %s (%s): %s; falling back to raw transcript",
+                    job.job_id, item.video_id, out_lang, code,
+                    # Rate-limit bodies carry the Groq organisation id; the code says enough.
+                    "rate limited" if code == "TRANSLATION_RATE_LIMITED" else trans_exc,
                 )
                 # Keep the original text, but say so: the item must never look translated.
                 item.transcript = item.raw_transcript
-                item.translation_error = public_message(_translation_error_code(trans_exc))
+                item.translation_error = public_message(code)
+                return code, getattr(trans_exc, "retry_after", None)
+        return None, None
 
     async def _run_job(
         self,
@@ -844,6 +893,7 @@ class TranscriptJobManager:
     ) -> None:
         """Execute transcript retrieval with pacing, circuit breaker cooldown, and retry."""
         from services.transcript_service import TranscriptService
+        from services.transcription.groq import groq_cooldown
         from services.transcription.stt_gate import STTBusyError, stt_gate
 
         transcript_svc = TranscriptService()
@@ -856,6 +906,19 @@ class TranscriptJobManager:
         for item in job.videos:
             if job.status == JobStatus.CANCELLED:
                 break
+
+            if _needs_translation_retry(job, item):
+                # The transcript is already here; only the rewrite failed (e.g. Groq quota).
+                code, wait = await self._apply_output_language(job, item)
+                self._recalculate_counters(job)
+                await self._save_checkpoint_async(job)
+                if code == "TRANSLATION_RATE_LIMITED":
+                    await self._pause_for_provider_limit(job, "translation", wait)
+                    return
+                continue
+
+            # Groq refused for a while (daily quota): stop instead of failing every remaining video.
+            provider_pause: tuple[str, float | None] | None = None
 
             # Skip videos that already succeeded or have confirmed no captions
             if item.status == "success" or item.status == "no_captions":
@@ -912,7 +975,9 @@ class TranscriptJobManager:
                         item.completed_at = datetime.now(UTC).isoformat()
                         consecutive_rate_limits = 0
                         acquired_success = True
-                        await self._apply_output_language(job, item)
+                        code, wait = await self._apply_output_language(job, item)
+                        if code == "TRANSLATION_RATE_LIMITED":
+                            provider_pause = ("translation", wait)
                         break
 
                     error_code = getattr(res, "error_code", None) or "NO_CAPTIONS"
@@ -999,9 +1064,14 @@ class TranscriptJobManager:
                                 item.method = "speech_to_text"
                                 item.completed_at = datetime.now(UTC).isoformat()
                                 acquired_success = True
-                                await self._apply_output_language(job, item)
+                                code, wait = await self._apply_output_language(job, item)
+                                if code == "TRANSLATION_RATE_LIMITED":
+                                    provider_pause = ("translation", wait)
                                 break
                             whisper_code = getattr(whisper_res, "error_code", None)
+                            if whisper_code == "STT_RATE_LIMITED":
+                                stt_model = getattr(settings, "groq_whisper_model", "whisper-large-v3")
+                                provider_pause = ("speech-to-text", groq_cooldown.remaining(stt_model) or None)
                             if whisper_code in RETRYABLE_ITEM_CODES:
                                 # Speech-to-text could not run (bot check, Groq outage, busy,
                                 # network): the video may well have speech. Keep it resumable.
@@ -1054,12 +1124,20 @@ class TranscriptJobManager:
                 item.status = "rate_limited" if item.error_code == "RATE_LIMITED" else "pending"
             self._recalculate_counters(job)
             await self._save_checkpoint_async(job)
+            if provider_pause is not None:
+                await self._pause_for_provider_limit(job, *provider_pause)
+                return
 
         if job.status not in (JobStatus.CANCELLED, JobStatus.PAUSED):
             job.status = JobStatus.COMPLETED
             job.completed_at = datetime.now(UTC).isoformat()
             job.cooldown_seconds_remaining = 0.0
             self._recalculate_counters(job)
+            if job.translation_failed:
+                job.error = (
+                    f"{job.translation_failed} video(s) could not be translated and contain the original "
+                    "text. Resume to retry the translation."
+                )
             await self._save_checkpoint_async(job)
             _log_job_outcome(job)
 

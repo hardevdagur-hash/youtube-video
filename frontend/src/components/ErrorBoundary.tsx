@@ -24,17 +24,17 @@ export default class ErrorBoundary extends Component<Props, State> {
     if (this.state.hasError) {
       if (this.props.fallback) return this.props.fallback;
       return (
-        <div className="flex items-center justify-center min-h-[200px]">
+        <div className="flex items-center justify-center min-h-[70vh] pt-12">
           <div className="text-center p-8">
-            <div className="w-12 h-12 rounded-full bg-red-50 dark:bg-red-900/30 flex items-center justify-center mx-auto mb-4">
-              <span className="text-red-500 text-xl">!</span>
-            </div>
-            <h3 className="text-base font-semibold text-gray-900 dark:text-white mb-1">
-              Something went wrong
+            <h3 className="text-[40px] font-semibold tracking-tight text-gray-900 dark:text-white mb-6">
+              Something went wrong.
             </h3>
-            <p className="text-sm text-gray-500 dark:text-gray-400">
-              Please refresh the page to try again.
-            </p>
+            <button
+              onClick={() => window.location.reload()}
+              className="inline-flex items-center px-6 py-2.5 bg-blue-600 text-white text-[15px] rounded-full hover:bg-blue-700 transition-colors"
+            >
+              Reload
+            </button>
           </div>
         </div>
       );

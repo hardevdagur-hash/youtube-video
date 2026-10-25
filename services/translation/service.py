@@ -8,7 +8,13 @@ from typing import Any, Literal
 
 from config.settings import get_settings
 from repositories.transcript_repository import TranscriptRepository
-from services.transcription.groq import GroqAuthError
+from services.transcription.groq import (
+    MAX_INLINE_WAIT_SECONDS,
+    GroqAuthError,
+    groq_cooldown,
+    is_rate_limit_error,
+    rate_limit_wait_seconds,
+)
 from services.translation.english import SIMPLE_ENGLISH_SYSTEM_PROMPT
 from services.translation.hindi import SIMPLE_HINDI_SYSTEM_PROMPT
 
@@ -28,6 +34,8 @@ _MAX_SPLIT_DEPTH = 3
 _MIN_SPLIT_WORDS = 150
 # Reasoning models spend output tokens on hidden reasoning; rewriting needs little of it.
 _REASONING_MODEL_PREFIXES = ("openai/gpt-oss",)
+# Short 429 waits (per-minute limits) are waited out at most this many times per part.
+_RATE_LIMIT_RETRIES = 2
 
 
 def _split_into_chunks(text: str, max_words: int = _CHUNK_WORDS) -> list[str]:
@@ -55,11 +63,18 @@ def _split_into_chunks(text: str, max_words: int = _CHUNK_WORDS) -> list[str]:
 class TranslationError(Exception):
     """Raised when on-demand translation fails."""
 
-    def __init__(self, message: str, error_code: str = "TRANSLATION_FAILED", retryable: bool = True) -> None:
+    def __init__(
+        self,
+        message: str,
+        error_code: str = "TRANSLATION_FAILED",
+        retryable: bool = True,
+        retry_after: float | None = None,
+    ) -> None:
         super().__init__(message)
         self.message = message
         self.error_code = error_code
         self.retryable = retryable
+        self.retry_after = retry_after  # seconds, for TRANSLATION_RATE_LIMITED
 
 
 class TranslationService:
@@ -84,8 +99,41 @@ class TranslationService:
             )
         if self._client is None:
             from groq import Groq
-            self._client = Groq(api_key=self.api_key, timeout=60)
+            # Retries and 429 waits are handled in _complete_with_backoff, not by the SDK.
+            self._client = Groq(api_key=self.api_key, timeout=60, max_retries=0)
         return self._client
+
+    def _complete_with_backoff(
+        self, client, system_prompt: str, user_content: str, max_tokens: int, label: str,
+    ) -> tuple[str, str | None]:
+        """``_complete`` that honours Groq rate limits and the process-wide cooldown.
+
+        A short wait (per-minute limit) is slept off and retried; a long one (daily token
+        quota) or repeated 429s trip the cooldown and raise TRANSLATION_RATE_LIMITED, so
+        later parts and videos fail fast without contacting Groq.
+        """
+        for attempt in range(_RATE_LIMIT_RETRIES + 1):
+            cooldown = groq_cooldown.remaining(self.model)
+            if cooldown > 0:
+                raise TranslationError(
+                    f"Groq rate limit cooldown active for {self.model} ({cooldown:.0f}s left)",
+                    error_code="TRANSLATION_RATE_LIMITED", retry_after=cooldown,
+                )
+            try:
+                return self._complete(client, system_prompt, user_content, max_tokens)
+            except Exception as exc:
+                if not is_rate_limit_error(exc):
+                    raise
+                wait = rate_limit_wait_seconds(exc)
+                if attempt == _RATE_LIMIT_RETRIES or wait > MAX_INLINE_WAIT_SECONDS:
+                    groq_cooldown.trip(self.model, wait)
+                    logger.warning("Groq translation rate limited for %s; retry after %.0fs", label, wait)
+                    raise TranslationError(
+                        f"Translation rate limited: {exc}", error_code="TRANSLATION_RATE_LIMITED", retry_after=wait,
+                    ) from exc
+                logger.info("Groq translation rate limited for %s; waiting %.1fs", label, wait)
+                time.sleep(wait)
+        raise AssertionError("unreachable")
 
     def _complete(
         self, client, system_prompt: str, user_content: str, max_tokens: int,
@@ -123,11 +171,14 @@ class TranslationService:
         """
         max_output_tokens = min(_MAX_OUTPUT_TOKENS, len(text.split()) * _TOKENS_PER_WORD[target_language] + 200)
         try:
-            content, finish_reason = self._complete(
+            content, finish_reason = self._complete_with_backoff(
                 client, system_prompt,
                 f"Convert the following transcript into {instruction}{part_note}:\n\n{text}",
                 max_output_tokens,
+                label,
             )
+        except TranslationError:
+            raise
         except Exception as exc:
             logger.error("Groq translation failed for %s: %s", label, exc)
             err_str = str(exc).lower()

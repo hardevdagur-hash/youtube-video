@@ -105,7 +105,7 @@ each one. The essentials:
 | `CORS_ORIGINS` | no | Only for cross-origin browser clients; never `*` |
 | `DATA_DIR` | no | Persistent data (`./data`; `/app/data` in Docker) |
 | `MAX_VIDEOS_PER_JOB`, `MAX_VIDEOS_SYNC_EXPORT`, `MAX_ACTIVE_JOBS[_PER_USER]` | no | Abuse/cost limits (100, 25, 4/2) |
-| `CHANNEL_MIN_VIDEO_SECONDS`, `CHANNEL_MAX_VIDEO_SECONDS` | no | Channel eligibility window (180, 1800 = 3:00–30:00) |
+| `CHANNEL_MIN_VIDEO_SECONDS`, `CHANNEL_MAX_VIDEO_SECONDS` | no | Channel eligibility window (180, 2100 = 3:00–35:00) |
 | `CHANNEL_DISCOVERY_SCAN_CAP` | no | Uploads examined to find `max_videos` eligible ones (1000; YouTube quota bound) |
 | `STT_MAX_AUDIO_SECONDS`, `STT_CHUNK_SECONDS` | no | Longest video sent to speech-to-text (7200); chunk length (600) |
 | `LOGIN_RATE_LIMIT_PER_MINUTE`, `LOGIN_USER_RATE_LIMIT_PER_MINUTE` | no | Login attempts per IP (5) and per username across IPs (30) |
@@ -191,7 +191,7 @@ without published app port. Details and key-rotation steps: [SECURITY.md](SECURI
   channels take time and can pause on persistent rate limiting (resume later).
 - **Channel eligibility differs from single videos.** Channel runs take only non-live
   uploads inside `CHANNEL_MIN_VIDEO_SECONDS`–`CHANNEL_MAX_VIDEO_SECONDS` (default
-  3:00–30:00, a product rule); a single-video request has no window, so a 45-minute
+  3:00–35:00, a product rule); a single-video request has no window, so a 45-minute
   lecture works on its own but is skipped by a channel run unless the maximum is raised.
   `max_videos` counts eligible videos; discovery examines at most
   `CHANNEL_DISCOVERY_SCAN_CAP` uploads to find them.

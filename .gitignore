@@ -41,9 +41,10 @@ local-dev-login.txt
 backups/
 docker/letsencrypt/
 
-# IDE
+# IDE / local tool settings
 .vscode/
 .idea/
+.claude/settings.local.json
 
 # OS
 Thumbs.db

@@ -62,7 +62,7 @@ Errors map to fixed public codes (`services/public_errors.py`), e.g.
 `services/channel_discovery.py` (one implementation for jobs, the synchronous route and
 CSV export). YouTube Data API: resolve the handle → uploads playlist (newest first) →
 for each page of 50 ids fetch metadata and keep videos that are **not live** and within
-`CHANNEL_MIN_VIDEO_SECONDS` ≤ duration < `CHANNEL_MAX_VIDEO_SECONDS` (default 3:00–30:00,
+`CHANNEL_MIN_VIDEO_SECONDS` ≤ duration < `CHANNEL_MAX_VIDEO_SECONDS` (default 3:00–35:00,
 `services/duration_filter.py`), optionally within `published_after/before`.
 
 Paging continues until `max_videos` *eligible* videos are found, the playlist ends,

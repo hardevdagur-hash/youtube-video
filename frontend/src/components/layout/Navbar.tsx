@@ -4,7 +4,6 @@ import { LogOut, Moon, Sun, Menu, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useTheme } from '../../theme/ThemeContext';
 import { useAuth } from '../../auth/AuthContext';
-import { Button } from '../ui';
 
 const navLinks = [
   { label: 'Transcript', path: '/transcript' },
@@ -13,69 +12,36 @@ const navLinks = [
 export default function Navbar() {
   const { dark, toggle } = useTheme();
   const { user, logout } = useAuth();
-  const [scrolled, setScrolled] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const location = useLocation();
-  const isHome = location.pathname === '/';
-
-  useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 20);
-    window.addEventListener('scroll', onScroll, { passive: true });
-    return () => window.removeEventListener('scroll', onScroll);
-  }, []);
 
   useEffect(() => {
     setMenuOpen(false);
   }, [location]);
 
-  const showBg = scrolled || !isHome;
+  const iconBtn =
+    'p-1.5 rounded-full text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors-200';
 
   return (
-    <header
-      className={`fixed top-0 left-0 right-0 z-50 transition-all-300 ${
-        showBg
-          ? 'bg-white/95 dark:bg-gray-950/95 backdrop-blur-xl border-b border-gray-100 dark:border-gray-800 shadow-sm'
-          : 'bg-transparent'
-      }`}
-    >
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between h-16 lg:h-[68px]">
-          {/* LEFT: MATRIX Brand + product name */}
-          <Link to="/transcript" className="flex items-center gap-3 no-underline group">
-            <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-700 text-white shadow-md shadow-emerald-500/20 group-hover:scale-105 transition-transform duration-200">
-              <span className="font-black text-sm tracking-tighter">M</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span className={`font-extrabold text-base tracking-wider uppercase ${showBg ? 'text-gray-900 dark:text-white' : 'text-white'}`}>
-                MATRIX
-              </span>
-              <span className={`text-xs px-1.5 py-0.5 rounded font-mono font-medium ${showBg ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-400' : 'bg-white/20 text-white'}`}>
-                v2
-              </span>
-              <span className={`hidden sm:inline-block w-px h-4 ${showBg ? 'bg-gray-300 dark:bg-gray-700' : 'bg-white/30'}`} />
-              <span className={`hidden sm:inline-block text-sm font-semibold ${showBg ? 'text-gray-600 dark:text-gray-300' : 'text-white/90'}`}>
-                YouTube Transcripts
-              </span>
-            </div>
+    <header className="fixed top-0 left-0 right-0 z-50 glass border-b border-black/5 dark:border-white/10">
+      <div className="max-w-5xl mx-auto px-4 sm:px-6">
+        <div className="flex items-center justify-between h-12">
+          <Link to="/transcript" className="flex items-center no-underline" aria-label="Matrix home">
+            <img src="/static/logo.png" alt="Matrix" className="h-5 w-auto dark:hidden" />
+            <img src="/static/logo-white.png" alt="Matrix" className="h-5 w-auto hidden dark:block" />
           </Link>
 
-          {/* RIGHT: Navigation + Theme */}
-          <nav className="hidden md:flex items-center gap-1.5">
+          <nav className="hidden md:flex items-center gap-5">
             {navLinks.map((link) => {
               const isActive = location.pathname === link.path;
-
               return (
                 <Link
                   key={link.label}
                   to={link.path}
-                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all-200 no-underline ${
+                  className={`text-xs no-underline transition-colors-200 ${
                     isActive
-                      ? showBg
-                        ? 'text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/30'
-                        : 'text-emerald-300 bg-white/15 shadow-sm'
-                      : showBg
-                        ? 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800'
-                        : 'text-white/80 hover:text-white hover:bg-white/10'
+                      ? 'text-gray-900 dark:text-white'
+                      : 'text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
                   }`}
                 >
                   {link.label}
@@ -83,44 +49,28 @@ export default function Navbar() {
               );
             })}
 
-            <div className={`h-4 w-px mx-1.5 ${showBg ? 'bg-gray-200 dark:bg-gray-800' : 'bg-white/20'}`} />
-
-            <button
-              onClick={toggle}
-              className={`p-2 rounded-lg transition-all-200 ${
-                showBg
-                  ? 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800'
-                  : 'text-white/80 hover:text-white hover:bg-white/10'
-              }`}
-              aria-label="Toggle dark mode"
-            >
-              {dark ? <Sun size={18} /> : <Moon size={18} />}
+            <button onClick={toggle} className={iconBtn} aria-label="Toggle dark mode">
+              {dark ? <Sun size={15} /> : <Moon size={15} />}
             </button>
 
             {user && (
               <button
                 onClick={logout}
-                className={`p-2 rounded-lg transition-all-200 ${
-                  showBg
-                    ? 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800'
-                    : 'text-white/80 hover:text-white hover:bg-white/10'
-                }`}
+                className={iconBtn}
                 aria-label={`Sign out ${user.username}`}
                 title={`Sign out ${user.username}`}
               >
-                <LogOut size={18} />
+                <LogOut size={15} />
               </button>
             )}
           </nav>
 
           <button
             onClick={() => setMenuOpen(!menuOpen)}
-            className={`md:hidden p-2 rounded-lg transition-all-200 ${
-              showBg ? 'text-gray-600 dark:text-gray-300' : 'text-white'
-            }`}
+            className={`md:hidden ${iconBtn}`}
             aria-label="Toggle menu"
           >
-            {menuOpen ? <X size={22} /> : <Menu size={22} />}
+            {menuOpen ? <X size={18} /> : <Menu size={18} />}
           </button>
         </div>
       </div>
@@ -131,38 +81,30 @@ export default function Navbar() {
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: 'auto' }}
             exit={{ opacity: 0, height: 0 }}
-            className="md:hidden border-t border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-950 shadow-lg overflow-hidden"
+            className="md:hidden overflow-hidden"
           >
-            <div className="px-4 py-4 space-y-1">
-              {navLinks.map((link) => {
-                const isActive = location.pathname === link.path;
-
-                return (
-                  <Link
-                    key={link.label}
-                    to={link.path}
-                    className={`block px-3 py-2.5 rounded-lg text-sm font-medium no-underline ${
-                      isActive
-                        ? 'text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/30'
-                        : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'
-                    }`}
-                  >
-                    {link.label}
-                  </Link>
-                );
-              })}
+            <div className="px-6 pb-6 pt-2 space-y-1">
+              {navLinks.map((link) => (
+                <Link
+                  key={link.label}
+                  to={link.path}
+                  className="block py-2 text-2xl font-semibold text-gray-900 dark:text-white no-underline"
+                >
+                  {link.label}
+                </Link>
+              ))}
               <button
                 onClick={toggle}
-                className="flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 w-full"
+                className="flex items-center gap-2 py-2 text-sm text-gray-600 dark:text-gray-400 w-full"
               >
-                {dark ? <Sun size={16} /> : <Moon size={16} />} {dark ? 'Light Mode' : 'Dark Mode'}
+                {dark ? <Sun size={15} /> : <Moon size={15} />} {dark ? 'Light' : 'Dark'}
               </button>
               {user && (
                 <button
                   onClick={logout}
-                  className="flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 w-full"
+                  className="flex items-center gap-2 py-2 text-sm text-gray-600 dark:text-gray-400 w-full"
                 >
-                  <LogOut size={16} /> Sign out ({user.username})
+                  <LogOut size={15} /> Sign out
                 </button>
               )}
             </div>

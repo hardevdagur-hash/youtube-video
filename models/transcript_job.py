@@ -70,6 +70,8 @@ class TranscriptJobProgress(BaseModel):
     no_captions: int = 0
     rate_limited: int = 0
     failed: int = 0
+    # Succeeded items whose Simple English / Simple Hindi rewrite failed (original text kept; Resume retries).
+    translation_failed: int = 0
     remaining: int = 0
     progress_percent: int = 0
     cooldown_seconds_remaining: float = 0.0

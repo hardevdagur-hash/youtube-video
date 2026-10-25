@@ -1,14 +1,14 @@
 """Exact YouTube video duration filter.
 
 Business Rule:
-    3:00 <= duration < 30:00 (180 seconds <= duration_seconds < 1800 seconds)
+    3:00 <= duration < 35:00 (180 seconds <= duration_seconds < 2100 seconds)
 """
 
 import re
 from typing import NamedTuple
 
 MIN_DURATION_SECONDS = 180   # 3 minutes inclusive
-MAX_DURATION_SECONDS = 1800  # 30 minutes exclusive
+MAX_DURATION_SECONDS = 2100  # 35 minutes exclusive
 
 
 class DurationFilterResult(NamedTuple):
@@ -52,7 +52,7 @@ def evaluate_duration(
     Rules:
         - Must not be live or upcoming broadcast (liveBroadcastContent != "none").
         - duration_seconds >= min_seconds (180s / 3:00).
-        - duration_seconds < max_seconds (1800s / 30:00).
+        - duration_seconds < max_seconds (2100s / 35:00).
 
     Returns:
         DurationFilterResult with is_eligible flag and machine-readable skip_reason.

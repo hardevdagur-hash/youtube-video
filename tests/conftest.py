@@ -23,12 +23,18 @@ os.environ["JWT_SECRET_KEY"] = "test-only-jwt-secret-" + "x" * 32
 
 @pytest.fixture(autouse=True)
 def _fresh_translation_service():
-    """The translation service is a process-wide singleton; tests patch its class."""
+    """The translation service is a process-wide singleton; tests patch its class.
+
+    The Groq rate-limit cooldown is process-wide too: one test's 429 must not block the next.
+    """
+    from services.transcription.groq import groq_cooldown
     from services.translation import service as translation_service
 
     translation_service.reset_translation_service()
+    groq_cooldown.reset()
     yield
     translation_service.reset_translation_service()
+    groq_cooldown.reset()
 
 
 # ---------------------------------------------------------------------------

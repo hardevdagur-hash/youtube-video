@@ -8,7 +8,7 @@ from services.duration_filter import (
 
 
 class TestDurationFilter:
-    """Tests for exact duration boundaries: 3:00 <= duration < 30:00 (180s <= sec < 1800s)."""
+    """Tests for exact duration boundaries: 3:00 <= duration < 35:00 (180s <= sec < 2100s)."""
 
     def test_exact_minimum_boundary_180s_is_eligible(self):
         """180 seconds (3:00) is eligible (inclusive minimum)."""
@@ -32,19 +32,19 @@ class TestDurationFilter:
         assert res.skip_reason is None
         assert res.duration_formatted == "11:48"
 
-    def test_just_under_maximum_1799s_is_eligible(self):
-        """1799 seconds (29:59) is eligible."""
-        res = evaluate_duration(1799, live_status="none")
+    def test_just_under_maximum_2099s_is_eligible(self):
+        """2099 seconds (34:59) is eligible."""
+        res = evaluate_duration(2099, live_status="none")
         assert res.is_eligible is True
         assert res.skip_reason is None
-        assert res.duration_formatted == "29:59"
+        assert res.duration_formatted == "34:59"
 
-    def test_exact_maximum_boundary_1800s_is_skipped(self):
-        """1800 seconds (30:00) is skipped as TOO_LONG (exclusive upper bound)."""
-        res = evaluate_duration(1800, live_status="none")
+    def test_exact_maximum_boundary_2100s_is_skipped(self):
+        """2100 seconds (35:00) is skipped as TOO_LONG (exclusive upper bound)."""
+        res = evaluate_duration(2100, live_status="none")
         assert res.is_eligible is False
         assert res.skip_reason == "TOO_LONG"
-        assert res.duration_formatted == "30:00"
+        assert res.duration_formatted == "35:00"
 
     def test_over_maximum_3600s_is_skipped(self):
         """3600 seconds (1 hour) is skipped as TOO_LONG."""

@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect, type FormEvent } from 'react';
-import { Youtube, CheckCircle2, XCircle, Loader2, ArrowRight, X, Clipboard, Users } from 'lucide-react';
+import { CheckCircle2, XCircle, Loader2, ChevronRight, X, Clipboard } from 'lucide-react';
 
 function isChannelHandle(input: string): boolean {
   const trimmed = input.trim();
@@ -190,35 +190,31 @@ export default function VideoUrlInput({
   };
 
   const borderColor = () => {
-    if (!touched || !url) return 'border-gray-200 dark:border-gray-700 focus:border-violet-400 dark:focus:border-violet-500';
-    if (loading) return 'border-gray-200 dark:border-gray-700';
-    if (validation?.valid) return 'border-emerald-400 dark:border-emerald-500';
-    if (validation && !validation.valid) return 'border-red-300 dark:border-red-700';
-    return 'border-gray-200 dark:border-gray-700';
+    if (!touched || !url || loading) return 'border-gray-300 dark:border-gray-700 focus:border-blue-600';
+    if (validation && !validation.valid) return 'border-red-400 dark:border-red-700';
+    return 'border-gray-300 dark:border-gray-700 focus:border-blue-600';
   };
 
   return (
     <form onSubmit={handleSubmit} noValidate>
-      <div className="mb-3">
-        <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wider mb-1.5">
-          YouTube Video URL
-        </label>
-        <div className="relative">
-          <Youtube size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400" />
+      <div className="flex flex-col sm:flex-row gap-3">
+        <div className="relative flex-1">
           <input
             ref={inputRef}
             type="text"
             value={url}
             onChange={(e) => handleChange(e.target.value)}
             onBlur={() => setTouched(true)}
-            placeholder="https://youtube.com/watch?v=..."
+            placeholder="Paste a YouTube link"
+            aria-label="YouTube video URL"
             disabled={isProcessing}
-            className={`h-11 w-full pl-9 pr-16 rounded-lg border text-sm transition-all outline-none bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-emerald-100 dark:focus:ring-emerald-900/30 ${borderColor()} ${isProcessing ? 'opacity-60 cursor-not-allowed' : ''}`}
+            className={`h-12 w-full pl-4 pr-20 rounded-xl border text-[15px] transition-all outline-none bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder:text-gray-400 focus:ring-4 focus:ring-blue-600/15 ${borderColor()} ${isProcessing ? 'opacity-60 cursor-not-allowed' : ''}`}
             autoFocus
             autoComplete="off"
             spellCheck={false}
           />
           <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1">
+            {statusIcon()}
             {url && (
               <button
                 type="button"
@@ -241,94 +237,31 @@ export default function VideoUrlInput({
             </button>
           </div>
         </div>
-      </div>
-
-      {/* Validation feedback */}
-      {touched && url && !loading && validation && (
-        <div
-          className={`mb-5 px-4 py-3 rounded-xl border text-sm ${
-            validation.url_type === 'channel'
-              ? 'bg-violet-50 dark:bg-violet-900/20 border-violet-200 dark:border-violet-800 text-violet-700 dark:text-violet-300'
-              : validation.valid
-              ? 'bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300'
-              : 'bg-red-50 dark:bg-red-900/20 border-red-200 dark:border-red-800 text-red-600 dark:text-red-400'
-          }`}
-        >
-          <div className="flex items-start gap-2.5">
-            {validation.url_type === 'channel' ? (
-              <Users size={16} className="mt-0.5 flex-shrink-0 text-violet-500" />
-            ) : validation.valid ? (
-              <CheckCircle2 size={16} className="mt-0.5 flex-shrink-0 text-emerald-500" />
-            ) : (
-              <XCircle size={16} className="mt-0.5 flex-shrink-0 text-red-500" />
-            )}
-            <div>
-              {validation.url_type === 'channel' ? (
-                <>
-                  <span className="font-medium">Channel detected</span>
-                  <div className="mt-0.5 text-xs opacity-75">
-                    Fetching transcripts for all videos in this channel...
-                  </div>
-                </>
-              ) : validation.valid ? (
-                <>
-                  <span className="font-medium">Valid URL</span>
-                  <div className="mt-0.5 font-mono text-xs opacity-75">
-                    Video ID: {validation.video_id}
-                  </div>
-                </>
-              ) : (
-                <span>{validation.error || 'Invalid YouTube video URL.'}</span>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Status indicator row */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2 text-xs text-gray-400 dark:text-gray-500">
-          {isProcessing && (
-            <span className="text-violet-600 dark:text-violet-400 font-medium inline-flex items-center gap-1.5">
-              <Loader2 size={12} className="animate-spin" />
-              Processing transcript...
-            </span>
-          )}
-          {!isProcessing && loading && <Loader2 size={12} className="animate-spin" />}
-          {!isProcessing && statusIcon()}
-          {!isProcessing && validation?.valid && !loading && (
-            <span className="text-emerald-600 dark:text-emerald-400 font-medium">
-              Ready to process
-            </span>
-          )}
-          {!isProcessing && validation && !validation.valid && !loading && (
-            <span className="text-red-500 font-medium">{validation.error || 'Unsupported URL'}</span>
-          )}
-        </div>
 
         <button
           type="button"
           onClick={handleButtonClick}
           disabled={!validation?.valid || isProcessing}
-          className={`inline-flex items-center gap-2 h-11 px-5 rounded-lg font-semibold text-sm transition-colors shadow-sm ${
+          className={`inline-flex items-center justify-center gap-1.5 h-12 px-6 rounded-full font-medium text-[15px] transition-colors ${
             validation?.valid && !isProcessing
-              ? 'bg-emerald-600 text-white hover:bg-emerald-700 active:bg-emerald-800 cursor-pointer'
-              : 'bg-gray-100 dark:bg-gray-800 text-gray-400 dark:text-gray-600 cursor-not-allowed'
+              ? 'bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800 cursor-pointer'
+              : 'bg-gray-200 dark:bg-gray-800 text-gray-400 dark:text-gray-600 cursor-not-allowed'
           }`}
         >
           {isProcessing ? (
-            <>
-              <Loader2 size={15} className="animate-spin" />
-              Processing...
-            </>
+            <Loader2 size={16} className="animate-spin" />
           ) : (
             <>
-              Extract Transcript
-              <ArrowRight size={14} />
+              Get Transcript
+              <ChevronRight size={16} />
             </>
           )}
         </button>
       </div>
+
+      {touched && url && !loading && validation && !validation.valid && (
+        <p className="mt-2 text-xs text-red-500">{validation.error || 'Unsupported URL'}</p>
+      )}
     </form>
   );
 }

@@ -63,6 +63,8 @@ export interface TranscriptJobProgressData {
   no_captions: number;
   rate_limited: number;
   failed: number;
+  // Videos holding the original text because their translation failed; Resume retries them.
+  translation_failed?: number;
   remaining: number;
   progress_percent: number;
   cooldown_seconds_remaining?: number;

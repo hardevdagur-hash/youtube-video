@@ -1,5 +1,4 @@
 import { createContext, useCallback, useContext, useEffect, useState, type FormEvent, type ReactNode } from 'react';
-import { LogIn } from 'lucide-react';
 import { Button } from '../components/ui';
 import { consumeGoogleAuthError, fetchGoogleEnabled, GoogleSignInButton, SignInDivider } from './GoogleSignIn';
 
@@ -32,7 +31,7 @@ export const DEFAULT_LIMITS: ServerLimits = {
   maxVideosSync: 25,
   maxActiveJobsPerUser: 2,
   channelMinVideoSeconds: 180,
-  channelMaxVideoSeconds: 1800,
+  channelMaxVideoSeconds: 2100,
 };
 
 /** "3:00" / "1:30:00" style label for a duration in seconds. */
@@ -44,7 +43,7 @@ export function formatDurationLabel(totalSeconds: number): string {
   return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
 }
 
-/** Human description of the channel eligibility window, e.g. "3:00 – 30:00". */
+/** Human description of the channel eligibility window, e.g. "3:00 – 35:00". */
 export function channelWindowLabel(limits: ServerLimits): string {
   return `${formatDurationLabel(limits.channelMinVideoSeconds)} – ${formatDurationLabel(limits.channelMaxVideoSeconds)}`;
 }
@@ -179,8 +178,8 @@ export function RequireAuth({ children }: { children: ReactNode }) {
   const { status } = useAuth();
   if (status === 'loading') {
     return (
-      <div className="flex items-center justify-center min-h-[200px]">
-        <div className="animate-pulse text-sm text-gray-400">Loading...</div>
+      <div className="flex items-center justify-center min-h-[70vh]">
+        <div className="w-5 h-5 rounded-full border-2 border-gray-300 border-t-gray-600 animate-spin" aria-label="Loading" />
       </div>
     );
   }
@@ -217,17 +216,16 @@ export function LoginForm() {
   };
 
   const inputCls =
-    'w-full px-4 py-2.5 rounded-xl border-2 border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm outline-none focus:border-emerald-400 focus:ring-4 focus:ring-emerald-100 dark:focus:ring-emerald-900/30';
+    'w-full px-4 py-3 rounded-xl border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-[15px] outline-none focus:border-blue-600 focus:ring-4 focus:ring-blue-600/15';
 
   return (
-    <div className="flex items-center justify-center min-h-[70vh] px-4 pt-24">
+    <div className="flex items-center justify-center min-h-[80vh] px-4 pt-24 pb-12">
       <form
         onSubmit={onSubmit}
-        className="w-full max-w-sm space-y-4 p-8 rounded-2xl border border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 shadow-sm"
+        className="w-full max-w-sm space-y-4"
         aria-label="Sign in"
       >
-        <h1 className="text-xl font-bold text-gray-900 dark:text-white">Sign in</h1>
-        <p className="text-sm text-gray-500 dark:text-gray-400">Sign in to fetch and export transcripts.</p>
+        <h1 className="text-[40px] font-semibold tracking-tight text-center text-gray-900 dark:text-white mb-8">Sign in</h1>
         {googleEnabled && (
           <>
             <GoogleSignInButton />
@@ -268,7 +266,7 @@ export function LoginForm() {
             {error}
           </p>
         )}
-        <Button type="submit" disabled={submitting} icon={<LogIn size={16} />} className="w-full">
+        <Button type="submit" size="lg" disabled={submitting} className="w-full">
           {submitting ? 'Signing in…' : 'Sign in'}
         </Button>
       </form>

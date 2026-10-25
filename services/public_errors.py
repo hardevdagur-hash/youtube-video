@@ -53,6 +53,9 @@ _ERRORS: dict[str, PublicError] = {
         503, "YouTube is temporarily blocking requests from this server. Please retry later.", True,
     ),
     "TRANSLATION_FAILED": PublicError(502, "The transcript could not be translated.", True),
+    "TRANSLATION_RATE_LIMITED": PublicError(
+        429, "The translation provider's usage limit was reached. Please retry later.", True,
+    ),
     "TRANSLATION_UNAVAILABLE": PublicError(
         503, "Translation is not available on this server right now (translation model not configured).", False,
     ),

@@ -192,7 +192,7 @@ class Settings:
         # Channel processing: which uploads are eligible (min <= duration < max), and how
         # many uploads discovery may examine to find them (YouTube quota: ~2 units per 50).
         self.channel_min_video_seconds: int = _env_int("CHANNEL_MIN_VIDEO_SECONDS", 180, 1, 86400)
-        self.channel_max_video_seconds: int = _env_int("CHANNEL_MAX_VIDEO_SECONDS", 1800, 2, 86400)
+        self.channel_max_video_seconds: int = _env_int("CHANNEL_MAX_VIDEO_SECONDS", 2100, 2, 86400)
         self.channel_discovery_scan_cap: int = _env_int("CHANNEL_DISCOVERY_SCAN_CAP", 1000, 50, 20000)
 
         # Job lifecycle: finished jobs stay on disk this long, then are deleted.

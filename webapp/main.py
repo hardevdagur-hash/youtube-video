@@ -51,6 +51,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config.settings import is_youtube_api_key_valid, settings
+from infrastructure.instance_lock import InstanceLock, check_worker_count
 from infrastructure.logging import setup_logging
 from infrastructure.request_context import (
     current_request_id,
@@ -152,18 +153,26 @@ async def lifespan(_app: FastAPI):
         "Transcript service starting (env=%s, data_dir=%s, stt_backend=%s)",
         _auth_settings.app_env, settings.data_dir, settings.stt_backend,
     )
-    await _to_thread(_clear_stale_audio)
-    # Single instance: anything left "running" on disk was interrupted by a crash or kill.
-    await _to_thread(transcript_job_manager.recover_interrupted_jobs)
-    await transcript_job_manager.run_retention_cleanup()
-    sweeper = asyncio.create_task(_retention_sweeper(transcript_job_manager))
+    # Job state and limiters are in memory: refuse to start as a second worker/replica on
+    # this DATA_DIR (it would mark the first one's running jobs as interrupted).
+    check_worker_count()
+    instance_lock = InstanceLock(settings.data_dir)
+    instance_lock.acquire()
     try:
-        yield
+        await _to_thread(_clear_stale_audio)
+        # Single instance: anything left "running" on disk was interrupted by a crash or kill.
+        await _to_thread(transcript_job_manager.recover_interrupted_jobs)
+        await transcript_job_manager.run_retention_cleanup()
+        sweeper = asyncio.create_task(_retention_sweeper(transcript_job_manager))
+        try:
+            yield
+        finally:
+            sweeper.cancel()
+            await transcript_job_manager.shutdown()
+            shutdown_transcript_work()
+            logger.info("Transcript service stopped")
     finally:
-        sweeper.cancel()
-        await transcript_job_manager.shutdown()
-        shutdown_transcript_work()
-        logger.info("Transcript service stopped")
+        instance_lock.release()
 
 
 # Security configuration: fails fast in production when credentials/secrets are unsafe
@@ -444,7 +453,13 @@ def _spa_index() -> FileResponse | HTMLResponse:
     if index_file.exists():
         return FileResponse(str(index_file), media_type="text/html")
     return HTMLResponse(
-        "<h1>Frontend not built</h1><p>Run <code>npm --prefix frontend run build</code> to build frontend production assets.</p>",
+        "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>Transcripts</title>"
+        "<body style=\"margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;"
+        "justify-content:center;background:#F5F5F7;color:#1D1D1F;text-align:center;"
+        "font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','Inter','Helvetica Neue',sans-serif\">"
+        "<h1 style=\"font-size:40px;font-weight:600;letter-spacing:-0.02em;margin:0 0 12px\">Frontend not built.</h1>"
+        "<p style=\"font-size:15px;color:#86868B;margin:0\">npm --prefix frontend run build</p></body>",
         status_code=503,
     )
 
@@ -815,7 +830,9 @@ async def api_transcript_unified(request: UnifiedTranscriptRequest, http_request
     except TranslationError as exc:
         logger.error("[%s] Translation failed: %s", rid, exc)
         transcript_metrics.record_final_result(success=False)
-        return _transcript_error(rid, "TRANSLATION_FAILED")
+        return _transcript_error(
+            rid, "TRANSLATION_RATE_LIMITED" if exc.error_code == "TRANSLATION_RATE_LIMITED" else "TRANSLATION_FAILED",
+        )
     except (TranscriptEmptyError, TranscriptValidationError) as exc:
         logger.warning("[%s] Quality validation failed (%s): %s", rid, exc.error_code, exc)
         transcript_metrics.record_final_result(success=False)
@@ -945,7 +962,7 @@ async def api_channel_transcripts(
 
     Returns channel info, statistics, and per-video results including metadata.
     ``limit`` counts eligible videos: CHANNEL_MIN_VIDEO_SECONDS <= duration <
-    CHANNEL_MAX_VIDEO_SECONDS (default 3:00-30:00), no live/upcoming streams.
+    CHANNEL_MAX_VIDEO_SECONDS (default 3:00-35:00), no live/upcoming streams.
     """
     rid = current_request_id()
     clean = handle.lstrip("@")

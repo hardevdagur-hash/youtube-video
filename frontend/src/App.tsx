@@ -11,8 +11,8 @@ const Transcript = lazy(() => import('./pages/Transcript'));
 function SuspenseWrapper({ children }: { children: React.ReactNode }) {
   return (
     <Suspense fallback={
-      <div className="flex items-center justify-center min-h-[200px]">
-        <div className="animate-pulse text-sm text-gray-400">Loading...</div>
+      <div className="flex items-center justify-center min-h-[70vh]">
+        <div className="w-5 h-5 rounded-full border-2 border-gray-300 border-t-gray-600 animate-spin" aria-label="Loading" />
       </div>
     }>
       {children}

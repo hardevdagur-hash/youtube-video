@@ -1,7 +1,9 @@
 """Groq Whisper Large V3 Speech-to-Text provider."""
 
 import logging
+import re
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,74 @@ logger = logging.getLogger(__name__)
 
 # Groq rejects uploads over 25 MB; stay a little below it for multipart overhead.
 MAX_UPLOAD_BYTES = 24 * 1024 * 1024
+
+# A 429 asking for a wait up to this long is waited out in place; a longer one (a
+# tokens-per-day quota says "try again in 11m...") fails fast and trips the cooldown.
+MAX_INLINE_WAIT_SECONDS = 30.0
+_DEFAULT_RATE_LIMIT_WAIT = 60.0
+_MAX_RATE_LIMIT_WAIT = 24 * 3600.0
+_TRY_AGAIN_RE = re.compile(
+    r"try again in\s+(?:(?P<h>\d+(?:\.\d+)?)h)?(?:(?P<m>\d+(?:\.\d+)?)m(?!s))?"
+    r"(?:(?P<s>\d+(?:\.\d+)?)s)?(?:(?P<ms>\d+(?:\.\d+)?)ms)?",
+    re.IGNORECASE,
+)
+
+
+def is_rate_limit_error(exc: BaseException) -> bool:
+    return getattr(exc, "status_code", None) == 429 or "rate_limit" in str(exc).lower()
+
+
+def rate_limit_wait_seconds(exc: BaseException) -> float:
+    """Seconds Groq asked us to wait: the ``retry-after`` header, else "try again in 11m31.2s"."""
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        try:
+            value = float(headers.get("retry-after"))
+            if value > 0:
+                return min(value, _MAX_RATE_LIMIT_WAIT)
+        except (TypeError, ValueError):
+            pass
+    match = _TRY_AGAIN_RE.search(str(exc))
+    if match and any(match.groupdict().values()):
+        parts = {k: float(v) for k, v in match.groupdict().items() if v}
+        seconds = (
+            parts.get("h", 0.0) * 3600 + parts.get("m", 0.0) * 60 + parts.get("s", 0.0) + parts.get("ms", 0.0) / 1000
+        )
+        if seconds > 0:
+            return min(seconds, _MAX_RATE_LIMIT_WAIT)
+    return _DEFAULT_RATE_LIMIT_WAIT
+
+
+class GroqCooldown:
+    """Process-wide "do not call this model until" times, set when Groq rate limits us.
+
+    Every caller of a model checks it before a request, so once a quota is exhausted the
+    process stops sending requests Groq will refuse anyway (thread-safe).
+    """
+
+    def __init__(self) -> None:
+        self._until: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def trip(self, model: str, seconds: float) -> None:
+        until = time.monotonic() + max(0.0, seconds)
+        with self._lock:
+            if until > self._until.get(model, 0.0):
+                self._until[model] = until
+        logger.warning("Groq model %s rate limited; pausing requests to it for %.0fs", model, seconds)
+
+    def remaining(self, model: str) -> float:
+        with self._lock:
+            until = self._until.get(model)
+        return max(0.0, until - time.monotonic()) if until else 0.0
+
+    def reset(self) -> None:
+        with self._lock:
+            self._until.clear()
+
+
+groq_cooldown = GroqCooldown()
 
 
 class GroqTranscriptionError(Exception):
@@ -41,8 +111,11 @@ class GroqAuthError(GroqTranscriptionError):
 
 
 class GroqRateLimitError(GroqTranscriptionError):
-    def __init__(self, message: str = "Groq API rate limit reached. Please try again.") -> None:
+    def __init__(
+        self, message: str = "Groq API rate limit reached. Please try again.", retry_after: float | None = None,
+    ) -> None:
         super().__init__(message, error_code="GROQ_RATE_LIMIT", retryable=True)
+        self.retry_after = retry_after
 
 
 class GroqTimeoutError(GroqTranscriptionError):
@@ -70,7 +143,8 @@ class GroqWhisperProvider(TranscriptionProvider):
         if self.api_key:
             try:
                 from groq import Groq
-                self._client = Groq(api_key=self.api_key, timeout=self.timeout)
+                # The SDK's own retries (default 2) would multiply with the loop in _transcribe_file.
+                self._client = Groq(api_key=self.api_key, timeout=self.timeout, max_retries=0)
             except Exception as e:
                 logger.warning("Failed to instantiate Groq client: %s", e)
 
@@ -81,7 +155,7 @@ class GroqWhisperProvider(TranscriptionProvider):
             )
         if self._client is None:
             from groq import Groq
-            self._client = Groq(api_key=self.api_key, timeout=self.timeout)
+            self._client = Groq(api_key=self.api_key, timeout=self.timeout, max_retries=0)
         return self._client
 
     def transcribe(
@@ -200,6 +274,11 @@ class GroqWhisperProvider(TranscriptionProvider):
 
         last_exc: Exception | None = None
         for attempt in range(1, self.max_retries + 1):
+            cooldown = groq_cooldown.remaining(self.model)
+            if cooldown > 0:
+                raise GroqRateLimitError(
+                    f"Groq rate limit cooldown active for {self.model} ({cooldown:.0f}s left)", retry_after=cooldown,
+                )
             try:
                 with open(audio_path, "rb") as audio_file:
                     kwargs: dict[str, Any] = {
@@ -238,12 +317,13 @@ class GroqWhisperProvider(TranscriptionProvider):
                 if status_code == 401 or "authentication" in error_str or "api_key" in error_str:
                     raise GroqAuthError(f"Groq authentication failed: {exc}") from exc
 
-                if status_code == 429 or "rate_limit" in error_str:
-                    if attempt == self.max_retries:
-                        raise GroqRateLimitError(f"Groq rate limit exceeded: {exc}") from exc
-                    backoff = 2 ** attempt
-                    logger.info("Rate limited by Groq. Backing off for %ds...", backoff)
-                    time.sleep(backoff)
+                if is_rate_limit_error(exc):
+                    wait = rate_limit_wait_seconds(exc)
+                    if attempt == self.max_retries or wait > MAX_INLINE_WAIT_SECONDS:
+                        groq_cooldown.trip(self.model, wait)
+                        raise GroqRateLimitError(f"Groq rate limit exceeded: {exc}", retry_after=wait) from exc
+                    logger.info("Rate limited by Groq. Waiting %.1fs as requested...", wait)
+                    time.sleep(wait)
                     continue
 
                 if "timeout" in error_str:

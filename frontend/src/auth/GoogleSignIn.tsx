@@ -74,7 +74,7 @@ export function GoogleSignInButton() {
   return (
     <a
       href={GOOGLE_START_URL}
-      className="w-full inline-flex items-center justify-center gap-3 px-4 py-2.5 rounded-xl border-2 border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm font-medium text-gray-800 dark:text-gray-100 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors outline-none focus-visible:ring-4 focus-visible:ring-emerald-100 dark:focus-visible:ring-emerald-900/30"
+      className="w-full inline-flex items-center justify-center gap-3 px-4 py-3 rounded-full border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-[15px] font-medium text-gray-900 dark:text-gray-100 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors outline-none focus-visible:ring-4 focus-visible:ring-blue-600/15"
     >
       <GoogleLogo />
       Continue with Google

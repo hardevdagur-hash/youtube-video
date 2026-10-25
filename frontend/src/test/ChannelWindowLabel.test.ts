@@ -9,8 +9,8 @@ describe('channel eligibility window label', () => {
     expect(formatDurationLabel(-5)).toBe('0:00');
   });
 
-  it('describes the default window like the backend default (3:00 – 30:00)', () => {
-    expect(channelWindowLabel(DEFAULT_LIMITS)).toBe('3:00 – 30:00');
+  it('describes the default window like the backend default (3:00 – 35:00)', () => {
+    expect(channelWindowLabel(DEFAULT_LIMITS)).toBe('3:00 – 35:00');
   });
 
   it('follows server-configured limits', () => {

@@ -675,13 +675,14 @@ async def test_job_item_with_transient_stt_failure_is_resumable(job_env):
     from models.transcript_job import JobStatus
     from tests.test_phase5_reliability import _finish
 
-    job_env.behaviour.update({job_env.videos[0]: "BOT_BLOCKED", job_env.videos[1]: "STT_RATE_LIMITED",
+    # (STT_RATE_LIMITED pauses the whole job instead: see test_groq_quota_handling.py.)
+    job_env.behaviour.update({job_env.videos[0]: "BOT_BLOCKED", job_env.videos[1]: "STT_TIMEOUT",
                               job_env.videos[2]: "NO_CAPTIONS"})
     job = await job_env.manager.start_channel_job("chan", owner="u", output_language="original")
     job = await _finish(job_env.manager, job.job_id)
     assert job.status == JobStatus.COMPLETED
     items = {v.video_id: v for v in job.videos}
-    for vid, code in ((job_env.videos[0], "BOT_BLOCKED"), (job_env.videos[1], "STT_RATE_LIMITED")):
+    for vid, code in ((job_env.videos[0], "BOT_BLOCKED"), (job_env.videos[1], "STT_TIMEOUT")):
         assert items[vid].status == "temporary_error" and items[vid].retryable is True
         assert items[vid].error_code == code
     assert items[job_env.videos[2]].status == "no_captions"  # a real "no speech/captions" stays final

@@ -9,11 +9,11 @@ interface CardProps extends HTMLAttributes<HTMLDivElement> {
 const paddings = {
   sm: 'p-4',
   md: 'p-6',
-  lg: 'p-8',
+  lg: 'p-6 sm:p-8',
 };
 
 export default function Card({
-  hover = true,
+  hover = false,
   padding = 'md',
   children,
   className = '',
@@ -21,8 +21,8 @@ export default function Card({
 }: CardProps) {
   return (
     <div
-      className={`bg-white dark:bg-gray-900 rounded-2xl border border-gray-100 dark:border-gray-800 shadow-card ${
-        hover ? 'hover:shadow-card-hover hover:-translate-y-0.5 transition-all-300' : ''
+      className={`bg-white dark:bg-gray-900 rounded-2xl ${
+        hover ? 'hover:shadow-card-hover transition-all-300' : ''
       } ${paddings[padding]} ${className}`}
       {...props}
     >
